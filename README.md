@@ -15,21 +15,27 @@ The explorer runs `pnpm dlx ccusage daily -b --json --offline`, then shows daily
 ```bash
 ./ai-usage-explorer.sh --since 20260401
 ./ai-usage-explorer.sh --refresh
+./ai-usage-explorer.sh --demo
 ./ai-usage-explorer.sh --file /tmp/ccusage-daily.json
 ```
 
 - `--since YYYYMMDD`: Start date for ccusage daily data.
 - `--until YYYYMMDD`: End date for ccusage daily data.
 - `--project NAME`: Pass through `ccusage --project`.
+- `--group day|month`: Initial grouping.
 - `--refresh`: Fetch current model pricing instead of using `ccusage --offline`.
-- `--file PATH`: Load an existing `ccusage daily --json` file.
+- `--demo`: Load bundled demo data instead of running `ccusage`.
+- `--file PATH`: Load an existing `ccusage` JSON file.
 
 ## Keyboard
 
 - `j` / `k` or `↑` / `↓`: Move day selection.
+- `pgup` / `pgdn`: Page day selection.
 - `g` / `G`: Jump to first / last day.
 - `m`: Cycle model filter.
-- `c` / `t` / `d`: Sort by cost / tokens / date.
+- `v`: Open date range filter. Defaults to month to date.
+- `space` / `enter`: Expand selected row model breakdown.
+- `f`: Cycle sort column.
 - `r`: Reverse sort order.
 - `1`-`5`: Chart metric: cost, total, input, output, cache.
 - `q`: Quit.
