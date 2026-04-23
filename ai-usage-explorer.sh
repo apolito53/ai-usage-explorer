@@ -38,6 +38,7 @@ Options:
 Keyboard:
   j/k or ↑/↓           Move day selection
   pgup/pgdn            Page day selection
+  tab                  Switch day list / chart focus
   g/G                  Jump to first/last day
   m                    Cycle model filter
   p                    Toggle day/month grouping
@@ -180,6 +181,7 @@ DATE_RANGES = [
     ("mtd", "Month to date", "month"),
     ("last_7", "Last 7 days", "days_7"),
     ("last_30", "Last 30 days", "days_30"),
+    ("custom", "Custom range", "custom"),
 ]
 DATE_RANGE_LABELS = {key: label for key, label, _kind in DATE_RANGES}
 DATE_RANGE_KEYS = [key for key, _label, _kind in DATE_RANGES]
@@ -221,6 +223,13 @@ class State:
     date_range: str = "mtd"
     range_menu_open: bool = False
     range_menu_index: int = 0
+    custom_range_start: str = ""
+    custom_range_end: str = ""
+    range_input_mode: bool = False
+    range_input: str = ""
+    range_error: str = ""
+    focus: str = "days"
+    chart_offset: int = 0
 
 
 class UsageExplorer:
@@ -234,6 +243,7 @@ class UsageExplorer:
         self.running = True
         self._tty = None
         self.page_size = 10
+        self.chart_page_size = 10
 
     def _models(self) -> List[str]:
         seen = []
@@ -256,16 +266,28 @@ class UsageExplorer:
             return (today - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
         if self.state.date_range == "last_30":
             return (today - timedelta(days=29)).replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.state.date_range == "custom":
+            return parse_row_date(self.state.custom_range_start)
+        return None
+
+    def date_range_end(self) -> Optional[datetime]:
+        if self.state.date_range == "custom":
+            end = parse_row_date(self.state.custom_range_end)
+            if end:
+                return end.replace(hour=23, minute=59, second=59, microsecond=999999)
         return None
 
     def filtered_rows(self) -> List[Dict]:
         model = self.selected_model()
         rows = self.rows
         start = self.date_range_start()
-        if start:
+        end = self.date_range_end()
+        if start or end:
             rows = [
                 row for row in rows
-                if (parsed := parse_row_date(str(row.get("date", "")))) and parsed >= start
+                if (parsed := parse_row_date(str(row.get("date", ""))))
+                and (not start or parsed >= start)
+                and (not end or parsed <= end)
             ]
         if model:
             rows = [
@@ -337,6 +359,8 @@ class UsageExplorer:
         sort_label = SORT_LABELS.get(self.state.sort_key, self.state.sort_key).lower()
         sort_arrow = "▼" if self.state.sort_desc else "▲"
         range_label = DATE_RANGE_LABELS.get(self.state.date_range, self.state.date_range)
+        if self.state.date_range == "custom":
+            range_label = f"{self.state.custom_range_start}..{self.state.custom_range_end}"
         text = Text()
         text.append(" AI Usage Explorer ", style="bold white on blue")
         text.append(f"  Model: {compact_model(model) if model else 'All'}  ", style="magenta")
@@ -458,16 +482,25 @@ class UsageExplorer:
                     used_lines += 1
         return Group(table, Text(""), self.render_metrics_footer(rows))
 
-    def render_chart(self, rows: List[Dict], height: int) -> Panel:
+    def chart_rows(self, rows: List[Dict]) -> List[Dict]:
         model = self.selected_model()
+        return [
+            self.model_row_values(row, model)
+            for row in sorted(rows, key=lambda row: row.get("date", ""))
+        ]
+
+    def render_chart(self, rows: List[Dict], height: int) -> Panel:
         metric_key, metric_label, getter, fmt = METRICS[self.state.metric_index]
-        max_rows = min(len(rows), max(height - 3, 0))
-        chart_source = rows[-max_rows:] if max_rows else []
-        chart_rows = [self.model_row_values(row, model) for row in chart_source]
+        chart_rows = self.chart_rows(rows)
+        visible_rows = max(height - 3, 0)
+        self.chart_page_size = max(visible_rows, 1)
+        max_offset = max(len(chart_rows) - visible_rows, 0)
+        self.state.chart_offset = max(0, min(self.state.chart_offset, max_offset))
+        chart_source = chart_rows[self.state.chart_offset:self.state.chart_offset + visible_rows] if visible_rows else []
         max_value = max((getter(row) for row in chart_rows), default=0)
         width = max(min((self.console.width or 100) - 52, 42), 10)
         text = Text()
-        for row in chart_rows:
+        for row in chart_source:
             value = getter(row)
             bar_len = int((value / max_value) * width) if max_value else 0
             bar = "█" * max(bar_len, 1 if value else 0)
@@ -475,7 +508,10 @@ class UsageExplorer:
             text.append(f"{row.get('date', '')} ", style="dim")
             text.append(f"{bar:<{width}} ", style=style)
             text.append((fmt.format(value) if metric_key != "cost" else fmt_cost(value)) + "\n", style="bold")
-        return Panel(text or Text("No data", style="dim"), title=f"[bold]{metric_label} Trend[/bold]", border_style="blue")
+        title = f"[bold]{metric_label} Trend[/bold]"
+        if self.state.focus == "chart":
+            title += " [bold yellow](focused)[/bold yellow]"
+        return Panel(text or Text("No data", style="dim"), title=title, border_style="bright_yellow" if self.state.focus == "chart" else "blue")
 
     def render_detail(self, rows: List[Dict]) -> Panel:
         if not rows:
@@ -508,6 +544,8 @@ class UsageExplorer:
         controls.append(" move  ")
         controls.append("pgup/pgdn", style="bold cyan")
         controls.append(" page  ")
+        controls.append("tab", style="bold cyan")
+        controls.append(" focus  ")
         controls.append("m", style="bold cyan")
         controls.append(" model  ")
         controls.append("v", style="bold cyan")
@@ -532,14 +570,52 @@ class UsageExplorer:
             selected = idx == self.state.range_menu_index
             active = key == self.state.date_range
             marker = "●" if active else " "
+            if key == "custom" and self.state.custom_range_start and self.state.custom_range_end:
+                label = f"Custom range  {self.state.custom_range_start}..{self.state.custom_range_end}"
             row_style = "bold black on bright_white" if selected else ""
             table.add_row(f"{marker} {label}", style=row_style)
+        content = [table]
+        if self.state.range_input_mode:
+            content.extend([
+                Text(""),
+                Text("Enter custom range as YYYY-MM-DD..YYYY-MM-DD", style="bold yellow"),
+                Text(self.state.range_input or " ", style="bold white on grey23"),
+            ])
+        if self.state.range_error:
+            content.append(Text(self.state.range_error, style="bold red"))
         return Panel(
-            table,
+            Group(*content),
             title="[bold]Date Range[/bold]",
             subtitle="j/k or ↑/↓ move • enter apply • esc close",
             border_style="yellow",
         )
+
+    def apply_custom_range(self) -> bool:
+        value = self.state.range_input.strip()
+        if ".." in value:
+            start, end = [part.strip() for part in value.split("..", 1)]
+        elif " to " in value:
+            start, end = [part.strip() for part in value.split(" to ", 1)]
+        else:
+            self.state.range_error = "Use YYYY-MM-DD..YYYY-MM-DD"
+            return False
+        if not parse_row_date(start) or not parse_row_date(end):
+            self.state.range_error = "Dates must be YYYY-MM-DD"
+            return False
+        if parse_row_date(start) > parse_row_date(end):
+            self.state.range_error = "Start date must be before end date"
+            return False
+        self.state.custom_range_start = start
+        self.state.custom_range_end = end
+        self.state.date_range = "custom"
+        self.state.range_input_mode = False
+        self.state.range_input = ""
+        self.state.range_error = ""
+        self.state.selected = 0
+        self.state.viewport = 0
+        self.state.expanded = False
+        self.state.range_menu_open = False
+        return True
 
     def render(self) -> Layout:
         rows = self.filtered_rows()
@@ -555,7 +631,10 @@ class UsageExplorer:
         )
         layout["body"].split_row(Layout(name="days", ratio=3), Layout(name="chart", ratio=2))
         layout["header"].update(self.render_header(rows))
-        layout["days"].update(Panel(self.render_days(rows, body_height), title="[bold]Daily Usage[/bold]", border_style="cyan"))
+        days_title = "[bold]Daily Usage[/bold]"
+        if self.state.focus == "days":
+            days_title += " [bold yellow](focused)[/bold yellow]"
+        layout["days"].update(Panel(self.render_days(rows, body_height), title=days_title, border_style="bright_yellow" if self.state.focus == "days" else "cyan"))
         layout["chart"].update(self.render_chart(rows, body_height))
         if self.state.range_menu_open:
             layout["detail"].update(self.render_range_menu())
@@ -567,6 +646,23 @@ class UsageExplorer:
     def handle_key(self, chars: bytes):
         rows = self.filtered_rows()
         if self.state.range_menu_open:
+            if self.state.range_input_mode:
+                if chars == b"\x1b":
+                    self.state.range_input_mode = False
+                    self.state.range_error = ""
+                elif chars in (b"\r", b"\n"):
+                    self.apply_custom_range()
+                elif chars in (b"\x7f", b"\b"):
+                    self.state.range_input = self.state.range_input[:-1]
+                else:
+                    try:
+                        text = chars.decode()
+                    except UnicodeDecodeError:
+                        text = ""
+                    if text and all(ch.isdigit() or ch in "-. to" for ch in text):
+                        self.state.range_input += text
+                        self.state.range_error = ""
+                return
             if chars in (b"\x1b", b"v"):
                 self.state.range_menu_open = False
             elif chars in (b"j", b"\x1b[B"):
@@ -578,7 +674,17 @@ class UsageExplorer:
             elif chars == b"\x1b[5~":
                 self.state.range_menu_index = max(self.state.range_menu_index - self.page_size, 0)
             elif chars in (b"\r", b"\n", b" "):
-                self.state.date_range = DATE_RANGES[self.state.range_menu_index][0]
+                selected_range = DATE_RANGES[self.state.range_menu_index][0]
+                if selected_range == "custom":
+                    self.state.range_input_mode = True
+                    self.state.range_input = (
+                        f"{self.state.custom_range_start}..{self.state.custom_range_end}"
+                        if self.state.custom_range_start and self.state.custom_range_end
+                        else ""
+                    )
+                    self.state.range_error = ""
+                    return
+                self.state.date_range = selected_range
                 self.state.selected = 0
                 self.state.viewport = 0
                 self.state.expanded = False
@@ -586,6 +692,22 @@ class UsageExplorer:
             return
         if chars in (b"q", b"\x03"):
             self.running = False
+        elif chars == b"\t":
+            self.state.focus = "chart" if self.state.focus == "days" else "days"
+        elif self.state.focus == "chart" and chars in (b"j", b"\x1b[B"):
+            max_offset = max(len(self.chart_rows(rows)) - self.chart_page_size, 0)
+            self.state.chart_offset = min(self.state.chart_offset + 1, max_offset)
+        elif self.state.focus == "chart" and chars in (b"k", b"\x1b[A"):
+            self.state.chart_offset = max(self.state.chart_offset - 1, 0)
+        elif self.state.focus == "chart" and chars == b"\x1b[6~":
+            max_offset = max(len(self.chart_rows(rows)) - self.chart_page_size, 0)
+            self.state.chart_offset = min(self.state.chart_offset + self.chart_page_size, max_offset)
+        elif self.state.focus == "chart" and chars == b"\x1b[5~":
+            self.state.chart_offset = max(self.state.chart_offset - self.chart_page_size, 0)
+        elif self.state.focus == "chart" and chars == b"g":
+            self.state.chart_offset = 0
+        elif self.state.focus == "chart" and chars == b"G":
+            self.state.chart_offset = max(len(self.chart_rows(rows)) - self.chart_page_size, 0)
         elif chars in (b"j", b"\x1b[B"):
             self.state.selected = min(self.state.selected + 1, max(len(rows) - 1, 0))
         elif chars in (b"k", b"\x1b[A"):
@@ -605,6 +727,8 @@ class UsageExplorer:
         elif chars == b"v":
             self.state.range_menu_open = True
             self.state.range_menu_index = DATE_RANGE_KEYS.index(self.state.date_range)
+            self.state.range_input_mode = False
+            self.state.range_error = ""
         elif chars in (b" ", b"\r", b"\n"):
             self.state.expanded = not self.state.expanded
         elif chars == b"f":
