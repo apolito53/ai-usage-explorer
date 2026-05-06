@@ -36,7 +36,8 @@ The explorer runs `pnpm dlx ccusage daily -b --json --offline`, then shows daily
 - `m`: Cycle model filter.
 - `v`: Open date range filter. Defaults to month to date. Custom ranges use `YYYY-MM-DD..YYYY-MM-DD`.
 - `space` / `enter`: Expand selected row model breakdown.
-- `f`: Cycle sort column.
-- `r`: Reverse sort order.
+- `←/→`: Cycle sort column (prev/next).
+- `s`: Reverse sort order.
+- `r`: Refresh data.
 - `1`-`5`: Chart metric: cost, total, input, output, cache.
 - `q`: Quit.

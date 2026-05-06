@@ -8,6 +8,10 @@
 #   ./ai-usage-explorer.sh --refresh
 #   ./ai-usage-explorer.sh --demo
 #   ./ai-usage-explorer.sh --file /tmp/ccusage-daily.json
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +24,7 @@ PROJECT=""
 JSON_FILE=""
 OFFLINE=1
 GROUP="day"
+DUMP_JSON=0
 
 usage() {
     cat <<'EOF'
@@ -42,10 +47,11 @@ Keyboard:
   g/G                  Jump to first/last day
   m                    Cycle model filter
   p                    Toggle day/month grouping
-  v                    Open date range filter
+  esc or v             Open date range menu
   space/enter          Expand selected row model breakdown
-  f                    Cycle sort column
-  r                    Reverse sort order
+  ←/→                  Cycle sort column (prev/next)
+  s                    Reverse sort order
+  r                    Refresh data
   1-5                  Chart metric: cost, total, input, output, cache
   q                    Quit
 EOF
@@ -53,6 +59,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --dump-json) DUMP_JSON=1; shift ;;
         --since) SINCE="$2"; shift 2 ;;
         --until) UNTIL="$2"; shift 2 ;;
         --project) PROJECT="$2"; shift 2 ;;
@@ -74,12 +81,7 @@ if [ ! -x "$PYTHON_BIN" ]; then
     PYTHON_BIN="python3"
 fi
 
-DATA_FILE="$JSON_FILE"
-if [ -z "$DATA_FILE" ]; then
-    DATA_FILE="$(mktemp)"
-    trap 'rm -f "$DATA_FILE"' EXIT
-
-    echo "Loading usage data..." >&2
+fetch_usage_data() {
     AI_USAGE_SINCE="$SINCE" \
     AI_USAGE_UNTIL="$UNTIL" \
     AI_USAGE_PROJECT="$PROJECT" \
@@ -124,16 +126,33 @@ print(json.dumps({
     "totals": daily.get("totals") or monthly.get("totals") or {},
 }))
 PY
-    ' > "$DATA_FILE"
+    '
+}
+
+if [ "$DUMP_JSON" -eq 1 ]; then
+    fetch_usage_data
+    exit 0
 fi
 
-"$PYTHON_BIN" - "$DATA_FILE" "$GROUP" <<'PYTHON_EOF'
+DATA_FILE="$JSON_FILE"
+if [ -z "$DATA_FILE" ]; then
+    DATA_FILE="$(mktemp)"
+    trap 'rm -f "$DATA_FILE"' EXIT
+
+    echo "Loading usage data..." >&2
+    fetch_usage_data > "$DATA_FILE"
+fi
+
+"$PYTHON_BIN" - "$DATA_FILE" "$GROUP" "$0" "$JSON_FILE" "$SINCE" "$UNTIL" "$PROJECT" "$OFFLINE" <<'PYTHON_EOF'
 import json
 import os
+import queue
+import select
+import subprocess
 import sys
 import termios
+import threading
 import tty
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -185,6 +204,7 @@ DATE_RANGES = [
 ]
 DATE_RANGE_LABELS = {key: label for key, label, _kind in DATE_RANGES}
 DATE_RANGE_KEYS = [key for key, _label, _kind in DATE_RANGES]
+SPINNER_FRAMES = ["|", "/", "-", "\\"]
 
 
 def compact_model(name: str) -> str:
@@ -211,6 +231,13 @@ def parse_row_date(value: str) -> Optional[datetime]:
     return None
 
 
+def parse_custom_date(value: str) -> Optional[datetime]:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
 @dataclass
 class State:
     selected: int = 0
@@ -225,25 +252,47 @@ class State:
     range_menu_index: int = 0
     custom_range_start: str = ""
     custom_range_end: str = ""
-    range_input_mode: bool = False
-    range_input: str = ""
+    range_focus: str = "menu"
+    range_field_index: int = 0
+    range_start_input: str = ""
+    range_end_input: str = ""
     range_error: str = ""
     focus: str = "days"
     chart_offset: int = 0
+    status: str = ""
+    refreshing: bool = False
+    spinner_index: int = 0
 
 
 class UsageExplorer:
-    def __init__(self, data: Dict):
+    def __init__(self, data: Dict, source_path: str, script_path: str, file_path: str, since: str, until: str, project: str, offline: str):
         self.console = Console()
-        self.rows = data.get("daily", [])
-        self.totals = data.get("totals", {})
-        self.models = self._models()
-        self.model_colors = {m: MODEL_COLORS[i % len(MODEL_COLORS)] for i, m in enumerate(self.models)}
+        self.source_path = source_path
+        self.script_path = script_path
+        self.file_path = file_path
+        self.since = since
+        self.until = until
+        self.project = project
+        self.offline = offline
         self.state = State()
+        self.load_data(data)
         self.running = True
         self._tty = None
         self.page_size = 10
         self.chart_page_size = 10
+        self._refresh_queue = queue.Queue()
+        self._refresh_thread = None
+
+    def load_data(self, data: Dict):
+        self.rows = data.get("daily", [])
+        self.totals = data.get("totals", {})
+        self.models = self._models()
+        self.model_colors = {m: MODEL_COLORS[i % len(MODEL_COLORS)] for i, m in enumerate(self.models)}
+        self.state.model_index = min(self.state.model_index, len(self.models))
+        self.state.selected = 0
+        self.state.viewport = 0
+        self.state.chart_offset = 0
+        self.state.expanded = False
 
     def _models(self) -> List[str]:
         seen = []
@@ -353,6 +402,9 @@ class UsageExplorer:
             "peak": peak,
         }
 
+    def spinner_frame(self) -> str:
+        return SPINNER_FRAMES[self.state.spinner_index % len(SPINNER_FRAMES)]
+
     def render_header(self, rows: List[Dict]) -> Panel:
         model = self.selected_model()
         metric = METRICS[self.state.metric_index][1]
@@ -367,6 +419,15 @@ class UsageExplorer:
         text.append(f"  Range: {range_label}  ", style="yellow")
         text.append(f"  Metric: {metric}  ", style="bright_blue")
         text.append(f"  Sort: {sort_label} {sort_arrow}  ", style="white")
+        status = self.state.status
+        status_style = "bright_green"
+        if self.state.refreshing:
+            status = f"{self.spinner_frame()} Refreshing..."
+            status_style = "bright_yellow"
+        elif self.state.status.startswith("Refresh failed"):
+            status_style = "bold red"
+        if status:
+            text.append(f"  {status}", style=status_style)
         return Panel(text, border_style="dim")
 
     def column_header(self, key: str, label: str) -> Text:
@@ -387,7 +448,7 @@ class UsageExplorer:
         estimate = Text()
         estimate.append(" EST ACTUAL ", style="bold black on bright_yellow")
         estimate.append(
-            f"  {fmt_cost(summary['cost'] * 1.2)}-{fmt_cost(summary['cost'] * 1.5)}",
+            f"  {fmt_cost(summary['cost'] * 1.3)}",
             style="bold yellow",
         )
         if summary["peak"]:
@@ -486,7 +547,7 @@ class UsageExplorer:
         model = self.selected_model()
         return [
             self.model_row_values(row, model)
-            for row in sorted(rows, key=lambda row: row.get("date", ""))
+            for row in rows
         ]
 
     def render_chart(self, rows: List[Dict], height: int) -> Panel:
@@ -548,78 +609,212 @@ class UsageExplorer:
         controls.append(" focus  ")
         controls.append("m", style="bold cyan")
         controls.append(" model  ")
-        controls.append("v", style="bold cyan")
+        controls.append("esc/v", style="bold cyan")
         controls.append(" range  ")
         controls.append("space", style="bold cyan")
         controls.append(" expand  ")
-        controls.append("f", style="bold cyan")
+        controls.append("←/→", style="bold cyan")
         controls.append(" sort column  ")
-        controls.append("r", style="bold cyan")
+        controls.append("s", style="bold cyan")
         controls.append(" reverse sort  ")
+        controls.append("r", style="bold cyan")
+        controls.append(" refresh  ")
         controls.append("1-5", style="bold cyan")
         controls.append(" metric  ")
         controls.append("q", style="bold cyan")
         controls.append(" quit")
-        note = Text("Estimated actual cost applies a 20-50% uplift to ccusage cost.", style="dim")
+        note = Text("Estimated actual cost applies a 1.3x multiplier to ccusage cost.", style="dim")
         return Panel(Group(Align.center(controls), Align.center(note)), border_style="dim")
 
     def render_range_menu(self) -> Panel:
         table = Table(show_header=False, box=None, expand=True)
         table.add_column("Range")
         for idx, (key, label, _kind) in enumerate(DATE_RANGES):
-            selected = idx == self.state.range_menu_index
+            selected = self.state.range_focus == "menu" and idx == self.state.range_menu_index
             active = key == self.state.date_range
             marker = "●" if active else " "
             if key == "custom" and self.state.custom_range_start and self.state.custom_range_end:
-                label = f"Custom range  {self.state.custom_range_start}..{self.state.custom_range_end}"
+                label = f"Custom range  {self.state.custom_range_start} to {self.state.custom_range_end}"
             row_style = "bold black on bright_white" if selected else ""
             table.add_row(f"{marker} {label}", style=row_style)
-        content = [table]
-        if self.state.range_input_mode:
-            content.extend([
-                Text(""),
-                Text("Enter custom range as YYYY-MM-DD..YYYY-MM-DD", style="bold yellow"),
-                Text(self.state.range_input or " ", style="bold white on grey23"),
-            ])
+
+        fields = Table(show_header=False, box=None, expand=True)
+        fields.add_column("Field", width=8, no_wrap=True)
+        fields.add_column("Value")
+        fields.add_row("Since", self.render_range_field(self.state.range_start_input, 0))
+        fields.add_row("Until", self.render_range_field(self.state.range_end_input, 1))
+
+        content = [
+            Text("Presets", style="bold cyan"),
+            table,
+            Text(""),
+            Text("Custom", style="bold cyan"),
+            fields,
+        ]
         if self.state.range_error:
             content.append(Text(self.state.range_error, style="bold red"))
+        subtitle = "esc close • j/k move • enter apply • tab custom fields"
+        if self.state.range_focus == "field":
+            subtitle = "tab switch field • enter next/apply • esc close"
         return Panel(
             Group(*content),
             title="[bold]Date Range[/bold]",
-            subtitle="j/k or ↑/↓ move • enter apply • esc close",
+            subtitle=subtitle,
             border_style="yellow",
+            expand=False,
+            width=min(76, max((self.console.width or 80) - 8, 30)),
         )
 
-    def apply_custom_range(self) -> bool:
-        value = self.state.range_input.strip()
-        if ".." in value:
-            start, end = [part.strip() for part in value.split("..", 1)]
-        elif " to " in value:
-            start, end = [part.strip() for part in value.split(" to ", 1)]
+    def render_range_field(self, value: str, index: int) -> Text:
+        focused = self.state.range_focus == "field" and self.state.range_field_index == index
+        text = Text(value or "YYYY-MM-DD")
+        if value:
+            text.stylize("bold black on bright_white" if focused else "bold white on grey23")
         else:
-            self.state.range_error = "Use YYYY-MM-DD..YYYY-MM-DD"
+            text.stylize("bold black on bright_white" if focused else "dim")
+        return text
+
+    def render_refresh_popup(self) -> Panel:
+        source = self.file_path if self.file_path else "ccusage daily/monthly"
+        text = Text()
+        text.append(f"{self.spinner_frame()} Refreshing usage data\n", style="bold bright_yellow")
+        text.append(str(source), style="dim")
+        return Panel(
+            Align.center(text),
+            title="[bold]Refresh[/bold]",
+            border_style="bright_yellow",
+            expand=False,
+            width=min(64, max((self.console.width or 80) - 10, 32)),
+        )
+
+    def open_range_menu(self):
+        self.state.range_menu_open = True
+        self.state.range_menu_index = DATE_RANGE_KEYS.index(self.state.date_range)
+        self.state.range_focus = "menu"
+        self.state.range_field_index = 0
+        self.state.range_start_input = self.state.custom_range_start
+        self.state.range_end_input = self.state.custom_range_end
+        self.state.range_error = ""
+
+    def close_range_menu(self):
+        self.state.range_menu_open = False
+        self.state.range_focus = "menu"
+        self.state.range_error = ""
+
+    def focus_custom_fields(self):
+        self.state.range_menu_index = DATE_RANGE_KEYS.index("custom")
+        self.state.range_focus = "field"
+        self.state.range_field_index = 0
+        self.state.range_error = ""
+
+    def apply_preset_range(self, selected_range: str):
+        self.state.date_range = selected_range
+        self.state.selected = 0
+        self.state.viewport = 0
+        self.state.expanded = False
+        self.close_range_menu()
+
+    def fetch_refresh_data(self) -> Dict:
+        if self.file_path:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        cmd = [self.script_path, "--dump-json", "--since", self.since]
+        if self.until:
+            cmd.extend(["--until", self.until])
+        if self.project:
+            cmd.extend(["--project", self.project])
+        if self.offline == "0":
+            cmd.append("--refresh")
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        with open(self.source_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return data
+
+    def start_refresh(self):
+        if self.state.refreshing:
+            return
+        self.state.refreshing = True
+        self.state.spinner_index = 0
+        self.state.status = "Refreshing..."
+
+        def worker():
+            try:
+                self._refresh_queue.put(("ok", self.fetch_refresh_data()))
+            except Exception as exc:
+                self._refresh_queue.put(("error", exc))
+
+        self._refresh_thread = threading.Thread(target=worker, daemon=True)
+        self._refresh_thread.start()
+
+    def apply_refresh_results(self) -> bool:
+        updated = False
+        while True:
+            try:
+                status, payload = self._refresh_queue.get_nowait()
+            except queue.Empty:
+                break
+            updated = True
+            self.state.refreshing = False
+            if status == "ok":
+                self.load_data(payload)
+                self.state.status = "Refreshed " + datetime.now().strftime("%H:%M:%S")
+            else:
+                self.state.status = f"Refresh failed: {payload}"
+        return updated
+
+    def apply_custom_range(self) -> bool:
+        start = self.state.range_start_input.strip()
+        end = self.state.range_end_input.strip()
+        start_date = parse_custom_date(start)
+        end_date = parse_custom_date(end)
+        if not start or not end:
+            self.state.range_error = "Enter both Since and Until dates"
             return False
-        if not parse_row_date(start) or not parse_row_date(end):
+        if not start_date or not end_date:
             self.state.range_error = "Dates must be YYYY-MM-DD"
             return False
-        if parse_row_date(start) > parse_row_date(end):
+        if start_date > end_date:
             self.state.range_error = "Start date must be before end date"
             return False
         self.state.custom_range_start = start
         self.state.custom_range_end = end
         self.state.date_range = "custom"
-        self.state.range_input_mode = False
-        self.state.range_input = ""
         self.state.range_error = ""
         self.state.selected = 0
         self.state.viewport = 0
         self.state.expanded = False
-        self.state.range_menu_open = False
+        self.close_range_menu()
         return True
 
     def render(self) -> Layout:
         rows = self.filtered_rows()
         console_height = self.console.height or 32
+        if self.state.refreshing:
+            layout = Layout()
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="body", ratio=1),
+                Layout(name="help", size=4),
+            )
+            layout["header"].update(self.render_header(rows))
+            layout["body"].update(Align.center(self.render_refresh_popup(), vertical="middle"))
+            layout["help"].update(self.render_help())
+            return layout
+
+        if self.state.range_menu_open:
+            layout = Layout()
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="body", ratio=1),
+                Layout(name="help", size=4),
+            )
+            layout["header"].update(self.render_header(rows))
+            layout["body"].update(Align.center(self.render_range_menu(), vertical="middle"))
+            layout["help"].update(self.render_help())
+            return layout
+
         detail_height = max(8, min(13, console_height // 3))
         body_height = max(3, console_height - 3 - detail_height - 4)
         layout = Layout()
@@ -636,35 +831,57 @@ class UsageExplorer:
             days_title += " [bold yellow](focused)[/bold yellow]"
         layout["days"].update(Panel(self.render_days(rows, body_height), title=days_title, border_style="bright_yellow" if self.state.focus == "days" else "cyan"))
         layout["chart"].update(self.render_chart(rows, body_height))
-        if self.state.range_menu_open:
-            layout["detail"].update(self.render_range_menu())
-        else:
-            layout["detail"].update(self.render_detail(rows))
+        layout["detail"].update(self.render_detail(rows))
         layout["help"].update(self.render_help())
         return layout
 
     def handle_key(self, chars: bytes):
+        if self.state.refreshing:
+            return
+
         rows = self.filtered_rows()
         if self.state.range_menu_open:
-            if self.state.range_input_mode:
-                if chars == b"\x1b":
-                    self.state.range_input_mode = False
-                    self.state.range_error = ""
+            if chars in (b"\x03",):
+                self.running = False
+                return
+            if chars in (b"\x1b", b"v"):
+                self.close_range_menu()
+                return
+            if self.state.range_focus == "field":
+                current_value = self.state.range_start_input if self.state.range_field_index == 0 else self.state.range_end_input
+                if chars == b"\t":
+                    self.state.range_field_index = 1 - self.state.range_field_index
                 elif chars in (b"\r", b"\n"):
-                    self.apply_custom_range()
+                    if self.state.range_field_index == 0:
+                        self.state.range_field_index = 1
+                    else:
+                        self.apply_custom_range()
                 elif chars in (b"\x7f", b"\b"):
-                    self.state.range_input = self.state.range_input[:-1]
+                    current_value = current_value[:-1]
+                elif chars == b"\x15":
+                    current_value = ""
+                elif chars in (b"\x1b[B", b"j"):
+                    self.state.range_field_index = min(self.state.range_field_index + 1, 1)
+                elif chars in (b"\x1b[A", b"k"):
+                    if self.state.range_field_index == 0:
+                        self.state.range_focus = "menu"
+                    else:
+                        self.state.range_field_index = 0
                 else:
                     try:
                         text = chars.decode()
                     except UnicodeDecodeError:
                         text = ""
-                    if text and all(ch.isdigit() or ch in "-. to" for ch in text):
-                        self.state.range_input += text
+                    if text and all(ch.isdigit() or ch == "-" for ch in text):
+                        current_value = (current_value + text)[:10]
                         self.state.range_error = ""
+                if self.state.range_field_index == 0:
+                    self.state.range_start_input = current_value
+                else:
+                    self.state.range_end_input = current_value
                 return
-            if chars in (b"\x1b", b"v"):
-                self.state.range_menu_open = False
+            if chars == b"\t":
+                self.focus_custom_fields()
             elif chars in (b"j", b"\x1b[B"):
                 self.state.range_menu_index = min(self.state.range_menu_index + 1, len(DATE_RANGES) - 1)
             elif chars in (b"k", b"\x1b[A"):
@@ -676,22 +893,14 @@ class UsageExplorer:
             elif chars in (b"\r", b"\n", b" "):
                 selected_range = DATE_RANGES[self.state.range_menu_index][0]
                 if selected_range == "custom":
-                    self.state.range_input_mode = True
-                    self.state.range_input = (
-                        f"{self.state.custom_range_start}..{self.state.custom_range_end}"
-                        if self.state.custom_range_start and self.state.custom_range_end
-                        else ""
-                    )
-                    self.state.range_error = ""
+                    self.focus_custom_fields()
                     return
-                self.state.date_range = selected_range
-                self.state.selected = 0
-                self.state.viewport = 0
-                self.state.expanded = False
-                self.state.range_menu_open = False
+                self.apply_preset_range(selected_range)
             return
         if chars in (b"q", b"\x03"):
             self.running = False
+        elif chars == b"\x1b":
+            self.open_range_menu()
         elif chars == b"\t":
             self.state.focus = "chart" if self.state.focus == "days" else "days"
         elif self.state.focus == "chart" and chars in (b"j", b"\x1b[B"):
@@ -725,19 +934,29 @@ class UsageExplorer:
             self.state.selected = 0
             self.state.viewport = 0
         elif chars == b"v":
-            self.state.range_menu_open = True
-            self.state.range_menu_index = DATE_RANGE_KEYS.index(self.state.date_range)
-            self.state.range_input_mode = False
-            self.state.range_error = ""
+            self.open_range_menu()
         elif chars in (b" ", b"\r", b"\n"):
             self.state.expanded = not self.state.expanded
-        elif chars == b"f":
+        elif chars in (b"\x1b[D", b"\x1bOD"):
+            index = SORT_KEYS.index(self.state.sort_key) if self.state.sort_key in SORT_KEYS else 0
+            self.state.sort_key = SORT_KEYS[(index - 1) % len(SORT_KEYS)]
+        elif chars in (b"\x1b[C", b"\x1bOC"):
             index = SORT_KEYS.index(self.state.sort_key) if self.state.sort_key in SORT_KEYS else 0
             self.state.sort_key = SORT_KEYS[(index + 1) % len(SORT_KEYS)]
-        elif chars == b"r":
+        elif chars == b"s":
             self.state.sort_desc = not self.state.sort_desc
+        elif chars == b"r":
+            self.start_refresh()
         elif chars in (b"1", b"2", b"3", b"4", b"5"):
             self.state.metric_index = int(chars.decode()) - 1
+
+    def flush_pending_input(self):
+        if not self._tty:
+            return
+        try:
+            termios.tcflush(self._tty.fileno(), termios.TCIFLUSH)
+        except termios.error:
+            pass
 
     def run(self):
         if not self.rows:
@@ -750,12 +969,33 @@ class UsageExplorer:
             tty.setcbreak(fd)
             with Live(self.render(), console=self.console, screen=True, refresh_per_second=8) as live:
                 while self.running:
-                    chars = os.read(fd, 8)
-                    if chars:
-                        self.handle_key(chars)
+                    was_refreshing = self.state.refreshing
+                    changed = self.apply_refresh_results()
+                    if was_refreshing and not self.state.refreshing:
+                        self.flush_pending_input()
+                        changed = True
+                    if self.state.refreshing:
+                        select.select([], [], [], 0.1)
+                        self.state.spinner_index = (self.state.spinner_index + 1) % len(SPINNER_FRAMES)
+                        changed = True
+                        if self.apply_refresh_results():
+                            self.flush_pending_input()
+                            changed = True
+                        if changed:
+                            live.update(self.render())
+                        continue
+
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                    if ready:
+                        chars = os.read(fd, 8)
+                        if chars:
+                            self.handle_key(chars)
+                            changed = True
+                    if self.apply_refresh_results():
+                        self.flush_pending_input()
+                        changed = True
+                    if changed:
                         live.update(self.render())
-                    else:
-                        time.sleep(0.05)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             self._tty.close()
@@ -765,7 +1005,16 @@ def main():
     path = sys.argv[1]
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    UsageExplorer(data).run()
+    UsageExplorer(
+        data=data,
+        source_path=path,
+        script_path=sys.argv[3],
+        file_path=sys.argv[4],
+        since=sys.argv[5],
+        until=sys.argv[6],
+        project=sys.argv[7],
+        offline=sys.argv[8],
+    ).run()
 
 
 if __name__ == "__main__":
