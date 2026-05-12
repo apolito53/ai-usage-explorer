@@ -243,7 +243,7 @@ class State:
     selected: int = 0
     model_index: int = 0
     sort_key: str = "date"
-    sort_desc: bool = False
+    sort_desc: bool = True
     metric_index: int = 0
     viewport: int = 0
     expanded: bool = False
