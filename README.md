@@ -1,6 +1,6 @@
 # AI Usage Explorer
 
-Interactive terminal dashboard for Claude Code usage data from `ccusage daily --json`.
+Interactive terminal dashboard for Claude and Codex usage data from `ccusage`.
 
 ## Usage
 
@@ -8,7 +8,7 @@ Interactive terminal dashboard for Claude Code usage data from `ccusage daily --
 ./ai-usage-explorer.sh
 ```
 
-The explorer runs `pnpm dlx ccusage daily -b --json --offline`, then shows daily usage, a trend chart, and the selected day's model breakdown.
+The explorer runs provider-specific `ccusage claude` and `ccusage codex` JSON commands, then shows daily usage, a trend chart, and the selected day's model breakdown.
 
 ## Options
 
@@ -21,7 +21,7 @@ The explorer runs `pnpm dlx ccusage daily -b --json --offline`, then shows daily
 
 - `--since YYYYMMDD`: Start date for ccusage daily data.
 - `--until YYYYMMDD`: End date for ccusage daily data.
-- `--project NAME`: Pass through `ccusage --project`.
+- `--project NAME`: Pass through Claude `ccusage --project`.
 - `--group day|month`: Initial grouping.
 - `--refresh`: Fetch current model pricing instead of using `ccusage --offline`.
 - `--demo`: Load bundled demo data instead of running `ccusage`.
@@ -33,6 +33,7 @@ The explorer runs `pnpm dlx ccusage daily -b --json --offline`, then shows daily
 - `pgup` / `pgdn`: Page day selection.
 - `tab`: Switch focus between the day list and trend chart.
 - `g` / `G`: Jump to first / last day.
+- `a`: Cycle provider filter (`Claude`, `Codex`, mixed, or all detected providers).
 - `m`: Cycle model filter.
 - `v`: Open date range filter. Defaults to month to date. Custom ranges use `YYYY-MM-DD..YYYY-MM-DD`.
 - `space` / `enter`: Expand selected row model breakdown.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interactive Claude Code usage explorer built on ccusage JSON output.
+# Interactive AI usage explorer built on ccusage JSON output.
 #
 # Examples:
 #   ./ai-usage-explorer.sh
@@ -33,7 +33,7 @@ Usage: ./ai-usage-explorer.sh [options]
 Options:
   --since YYYYMMDD     Start date for ccusage daily data (default: 20260209)
   --until YYYYMMDD     End date for ccusage daily data
-  --project NAME       Pass through ccusage --project
+  --project NAME       Pass through Claude ccusage --project
   --group day|month    Initial grouping (default: day)
   --refresh            Fetch current model pricing instead of ccusage --offline
   --demo               Load bundled demo data instead of running ccusage
@@ -45,6 +45,7 @@ Keyboard:
   pgup/pgdn            Page day selection
   tab                  Switch day list / chart focus
   g/G                  Jump to first/last day
+  a                    Cycle provider filter
   m                    Cycle model filter
   p                    Toggle day/month grouping
   esc or v             Open date range menu
@@ -88,13 +89,17 @@ fetch_usage_data() {
     AI_USAGE_OFFLINE="$OFFLINE" \
     bash -lic '
         nvm use 22 >/dev/null
-        build_args() {
-            local period="$1"
-            args=("$period" -b -s "$AI_USAGE_SINCE" --json)
+        build_provider_args() {
+            local provider="$1"
+            local period="$2"
+            args=("$provider" "$period" -s "$AI_USAGE_SINCE" --json)
+            if [ "$provider" = "claude" ]; then
+                args+=(-b)
+            fi
             if [ -n "$AI_USAGE_UNTIL" ]; then
                 args+=(-u "$AI_USAGE_UNTIL")
             fi
-            if [ -n "$AI_USAGE_PROJECT" ]; then
+            if [ "$provider" = "claude" ] && [ -n "$AI_USAGE_PROJECT" ]; then
                 args+=(-p "$AI_USAGE_PROJECT")
             fi
             if [ "$AI_USAGE_OFFLINE" -eq 1 ]; then
@@ -102,28 +107,136 @@ fetch_usage_data() {
             fi
         }
 
-        daily_file="$(mktemp)"
-        monthly_file="$(mktemp)"
-        trap "rm -f \"$daily_file\" \"$monthly_file\"" EXIT
+        data_dir="$(mktemp -d)"
+        trap "rm -rf \"$data_dir\"" EXIT
 
-        build_args daily
-        pnpm dlx ccusage "${args[@]}" > "$daily_file"
-        build_args monthly
-        pnpm dlx ccusage "${args[@]}" > "$monthly_file"
+        for provider in claude codex; do
+            for period in daily monthly; do
+                build_provider_args "$provider" "$period"
+                pnpm dlx ccusage "${args[@]}" > "$data_dir/$provider-$period.json"
+            done
+        done
 
-        python3 - "$daily_file" "$monthly_file" <<'"'"'PY'"'"'
+        python3 - "$data_dir" <<'"'"'PY'"'"'
 import json
+import os
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    daily = json.load(f)
-with open(sys.argv[2], "r", encoding="utf-8") as f:
-    monthly = json.load(f)
+PROVIDERS = ("claude", "codex")
+
+
+def read_provider(data_dir, provider, period):
+    with open(os.path.join(data_dir, f"{provider}-{period}.json"), "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def int_value(row, key):
+    return int(row.get(key, 0) or 0)
+
+
+def float_value(row, key):
+    return float(row.get(key, 0.0) or 0.0)
+
+
+def row_period(row, period):
+    if period == "monthly":
+        return row.get("month") or row.get("date") or row.get("period") or ""
+    return row.get("date") or row.get("period") or ""
+
+
+def normalize_claude_row(row, period):
+    normalized = {
+        "date": row_period(row, period),
+        "provider": "claude",
+        "providers": ["claude"],
+        "agent": "claude",
+        "inputTokens": int_value(row, "inputTokens"),
+        "outputTokens": int_value(row, "outputTokens"),
+        "cacheCreationTokens": int_value(row, "cacheCreationTokens"),
+        "cacheReadTokens": int_value(row, "cacheReadTokens"),
+        "totalTokens": int_value(row, "totalTokens"),
+        "totalCost": float_value(row, "totalCost"),
+        "modelsUsed": list(row.get("modelsUsed", [])),
+        "modelBreakdowns": list(row.get("modelBreakdowns", [])),
+        "metadata": {"agents": ["claude"]},
+    }
+    if not normalized["modelsUsed"]:
+        normalized["modelsUsed"] = [
+            item.get("modelName")
+            for item in normalized["modelBreakdowns"]
+            if item.get("modelName")
+        ]
+    return normalized
+
+
+def normalize_codex_row(row, period):
+    models = row.get("models") or {}
+    total_cost = float_value(row, "costUSD")
+    total_model_tokens = sum(int_value(values, "totalTokens") for values in models.values())
+    model_breakdowns = []
+    for model_name, values in models.items():
+        model_tokens = int_value(values, "totalTokens")
+        if len(models) == 1:
+            model_cost = total_cost
+        elif total_model_tokens:
+            model_cost = total_cost * (model_tokens / total_model_tokens)
+        else:
+            model_cost = 0.0
+        model_breakdowns.append({
+            "modelName": model_name,
+            "inputTokens": int_value(values, "inputTokens"),
+            "outputTokens": int_value(values, "outputTokens"),
+            "cacheCreationTokens": 0,
+            "cacheReadTokens": int_value(values, "cachedInputTokens"),
+            "cost": model_cost,
+        })
+
+    return {
+        "date": row_period(row, period),
+        "provider": "codex",
+        "providers": ["codex"],
+        "agent": "codex",
+        "inputTokens": int_value(row, "inputTokens"),
+        "outputTokens": int_value(row, "outputTokens"),
+        "cacheCreationTokens": 0,
+        "cacheReadTokens": int_value(row, "cachedInputTokens"),
+        "totalTokens": int_value(row, "totalTokens"),
+        "totalCost": total_cost,
+        "modelsUsed": list(models.keys()),
+        "modelBreakdowns": model_breakdowns,
+        "metadata": {"agents": ["codex"]},
+    }
+
+
+def normalize_rows(data, provider, period):
+    rows = data.get(period, [])
+    if provider == "claude":
+        return [normalize_claude_row(row, period) for row in rows]
+    return [normalize_codex_row(row, period) for row in rows]
+
+
+def totals(rows):
+    return {
+        "inputTokens": sum(int_value(row, "inputTokens") for row in rows),
+        "outputTokens": sum(int_value(row, "outputTokens") for row in rows),
+        "cacheCreationTokens": sum(int_value(row, "cacheCreationTokens") for row in rows),
+        "cacheReadTokens": sum(int_value(row, "cacheReadTokens") for row in rows),
+        "totalTokens": sum(int_value(row, "totalTokens") for row in rows),
+        "totalCost": sum(float_value(row, "totalCost") for row in rows),
+    }
+
+
+data_dir = sys.argv[1]
+daily_rows = []
+monthly_rows = []
+for provider in PROVIDERS:
+    daily_rows.extend(normalize_rows(read_provider(data_dir, provider, "daily"), provider, "daily"))
+    monthly_rows.extend(normalize_rows(read_provider(data_dir, provider, "monthly"), provider, "monthly"))
 
 print(json.dumps({
-    "daily": daily.get("daily", []),
-    "monthly": monthly.get("monthly", []),
-    "totals": daily.get("totals") or monthly.get("totals") or {},
+    "daily": daily_rows,
+    "monthly": monthly_rows,
+    "totals": totals(daily_rows),
 }))
 PY
     '
@@ -183,6 +296,12 @@ MODEL_COLORS = [
     "bright_blue", "bright_red", "cyan", "magenta", "green", "yellow",
 ]
 
+PROVIDER_ORDER = ["claude", "codex"]
+PROVIDER_LABELS = {
+    "claude": "Claude",
+    "codex": "Codex",
+}
+
 SORT_COLUMNS = [
     ("date", "Date"),
     ("cost", "Cost"),
@@ -190,6 +309,7 @@ SORT_COLUMNS = [
     ("input", "Input"),
     ("output", "Output"),
     ("cache", "Cache"),
+    ("providers", "Provider"),
     ("models", "Models"),
 ]
 SORT_LABELS = {key: label for key, label in SORT_COLUMNS}
@@ -212,6 +332,14 @@ def compact_model(name: str) -> str:
     for suffix in ("-20251001", "-20250929"):
         name = name.replace(suffix, "")
     return name
+
+
+def compact_provider(name: str) -> str:
+    return PROVIDER_LABELS.get(name, name.title())
+
+
+def compact_providers(names: List[str]) -> str:
+    return ", ".join(compact_provider(name) for name in names) or "Unknown"
 
 
 def fmt_int(value: float) -> str:
@@ -238,9 +366,104 @@ def parse_custom_date(value: str) -> Optional[datetime]:
         return None
 
 
+def row_date(row: Dict) -> str:
+    return str(row.get("date") or row.get("period") or "")
+
+
+def ordered_providers(names: List[str]) -> List[str]:
+    return sorted(
+        names,
+        key=lambda name: (
+            PROVIDER_ORDER.index(name) if name in PROVIDER_ORDER else len(PROVIDER_ORDER),
+            name,
+        ),
+    )
+
+
+def infer_model_provider(model: str) -> Optional[str]:
+    normalized = model.lower()
+    if normalized.startswith("claude-") or "claude" in normalized:
+        return "claude"
+    if normalized.startswith("gpt-") or "codex" in normalized or normalized.startswith(("o1", "o3", "o4")):
+        return "codex"
+    return None
+
+
+def model_matches_provider(model: str, provider: str, row_providers: List[str]) -> bool:
+    model_provider = infer_model_provider(model)
+    return model_provider == provider or (model_provider is None and provider in row_providers)
+
+
+def row_model_names(row: Dict) -> List[str]:
+    breakdowns = [
+        item.get("modelName")
+        for item in row.get("modelBreakdowns", [])
+        if item.get("modelName")
+    ]
+    if breakdowns:
+        return breakdowns
+    return [
+        model
+        for model in row.get("modelsUsed", [])
+        if model
+    ]
+
+
+def row_provider_names(row: Dict) -> List[str]:
+    providers = []
+
+    def add(provider: str):
+        provider = str(provider).strip().lower()
+        if provider and provider != "all" and provider not in providers:
+            providers.append(provider)
+
+    explicit = row.get("providers") or []
+    if isinstance(explicit, str):
+        explicit = [explicit]
+    for provider in explicit:
+        add(provider)
+
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    agents = metadata.get("agents") or []
+    if isinstance(agents, str):
+        agents = [agents]
+    for agent in agents:
+        add(agent)
+
+    if row.get("agent"):
+        add(row.get("agent"))
+
+    for model in row_model_names(row):
+        provider = infer_model_provider(model)
+        if provider:
+            add(provider)
+
+    return ordered_providers(providers)
+
+
+def detail_items(row: Dict) -> List[Dict]:
+    items = []
+    row_providers = row_provider_names(row)
+    for item in row.get("modelBreakdowns", []):
+        model = item.get("modelName", "")
+        provider = infer_model_provider(model)
+        items.append({
+            "label": compact_model(model),
+            "providers": [provider] if provider else row_providers,
+            "cost": float(item.get("cost", 0.0)),
+            "inputTokens": int(item.get("inputTokens", 0)),
+            "outputTokens": int(item.get("outputTokens", 0)),
+            "cacheCreationTokens": int(item.get("cacheCreationTokens", 0)),
+            "cacheReadTokens": int(item.get("cacheReadTokens", 0)),
+            "aggregate": False,
+        })
+    return items
+
+
 @dataclass
 class State:
     selected: int = 0
+    provider_index: int = 0
     model_index: int = 0
     sort_key: str = "date"
     sort_desc: bool = True
@@ -286,26 +509,88 @@ class UsageExplorer:
     def load_data(self, data: Dict):
         self.rows = data.get("daily", [])
         self.totals = data.get("totals", {})
+        self.providers = self._providers()
         self.models = self._models()
         self.model_colors = {m: MODEL_COLORS[i % len(MODEL_COLORS)] for i, m in enumerate(self.models)}
-        self.state.model_index = min(self.state.model_index, len(self.models))
+        self.state.provider_index = min(self.state.provider_index, len(self.provider_filter_options()) - 1)
+        self.state.model_index = min(self.state.model_index, len(self.available_models()))
         self.state.selected = 0
         self.state.viewport = 0
         self.state.chart_offset = 0
         self.state.expanded = False
 
+    def _providers(self) -> List[str]:
+        seen = []
+        for row in self.rows:
+            for provider in row_provider_names(row):
+                if provider not in seen:
+                    seen.append(provider)
+        return ordered_providers(seen)
+
     def _models(self) -> List[str]:
         seen = []
         for row in self.rows:
-            for model in row.get("modelsUsed", []):
+            for model in row_model_names(row):
+                if model not in seen:
+                    seen.append(model)
+        return sorted(seen)
+
+    def provider_filter_options(self):
+        options = [("all", "All")]
+        for provider in self.providers:
+            options.append((provider, compact_provider(provider)))
+        if any(len(row_provider_names(row)) > 1 for row in self.rows):
+            options.append(("mixed", "Mixed"))
+        return options
+
+    def selected_provider_filter(self):
+        options = self.provider_filter_options()
+        if not options:
+            return ("all", "All")
+        if self.state.provider_index >= len(options):
+            self.state.provider_index = 0
+        return options[self.state.provider_index]
+
+    def selected_provider_label(self) -> str:
+        return self.selected_provider_filter()[1]
+
+    def row_matches_provider_filter(self, row: Dict) -> bool:
+        key, _label = self.selected_provider_filter()
+        if key == "all":
+            return True
+        providers = row_provider_names(row)
+        if key == "mixed":
+            return len(providers) > 1
+        return providers == [key]
+
+    def selected_provider(self) -> Optional[str]:
+        key, _label = self.selected_provider_filter()
+        if key in self.providers:
+            return key
+        return None
+
+    def available_models(self) -> List[str]:
+        provider = self.selected_provider()
+        seen = []
+        for row in self.rows:
+            row_providers = row_provider_names(row)
+            if not self.row_matches_provider_filter(row):
+                continue
+            for model in row_model_names(row):
+                if provider and not model_matches_provider(model, provider, row_providers):
+                    continue
                 if model not in seen:
                     seen.append(model)
         return sorted(seen)
 
     def selected_model(self) -> Optional[str]:
+        models = self.available_models()
         if self.state.model_index == 0:
             return None
-        return self.models[self.state.model_index - 1]
+        if self.state.model_index > len(models):
+            self.state.model_index = 0
+            return None
+        return models[self.state.model_index - 1]
 
     def date_range_start(self) -> Optional[datetime]:
         today = datetime.now()
@@ -334,14 +619,18 @@ class UsageExplorer:
         if start or end:
             rows = [
                 row for row in rows
-                if (parsed := parse_row_date(str(row.get("date", ""))))
+                if (parsed := parse_row_date(row_date(row)))
                 and (not start or parsed >= start)
                 and (not end or parsed <= end)
             ]
+        rows = [
+            row for row in rows
+            if self.row_matches_provider_filter(row)
+        ]
         if model:
             rows = [
                 row for row in rows
-                if any(m.get("modelName") == model for m in row.get("modelBreakdowns", []))
+                if model in row_model_names(row)
             ]
 
         key = self.state.sort_key
@@ -357,9 +646,11 @@ class UsageExplorer:
                 return int(effective.get("outputTokens", 0))
             if key == "cache":
                 return int(effective.get("cacheCreationTokens", 0)) + int(effective.get("cacheReadTokens", 0))
+            if key == "providers":
+                return compact_providers(row_provider_names(effective))
             if key == "models":
                 return ", ".join(compact_model(name) for name in effective.get("modelsUsed", []))
-            return effective.get("date", "")
+            return row_date(effective)
 
         return sorted(rows, key=sorter, reverse=self.state.sort_desc)
 
@@ -369,7 +660,7 @@ class UsageExplorer:
         for item in row.get("modelBreakdowns", []):
             if item.get("modelName") == model:
                 return {
-                    "date": row.get("date"),
+                    "date": row_date(row),
                     "inputTokens": item.get("inputTokens", 0),
                     "outputTokens": item.get("outputTokens", 0),
                     "cacheCreationTokens": item.get("cacheCreationTokens", 0),
@@ -381,9 +672,12 @@ class UsageExplorer:
                         + int(item.get("cacheReadTokens", 0))
                     ),
                     "totalCost": item.get("cost", 0.0),
+                    "providers": [infer_model_provider(model)] if infer_model_provider(model) else row_provider_names(row),
                     "modelsUsed": [model],
                     "modelBreakdowns": [item],
                 }
+        if model in row_model_names(row):
+            return row
         return row
 
     def summary(self, rows: List[Dict]) -> Dict:
@@ -415,6 +709,7 @@ class UsageExplorer:
             range_label = f"{self.state.custom_range_start}..{self.state.custom_range_end}"
         text = Text()
         text.append(" AI Usage Explorer ", style="bold white on blue")
+        text.append(f"  Provider: {self.selected_provider_label()}  ", style="bright_magenta")
         text.append(f"  Model: {compact_model(model) if model else 'All'}  ", style="magenta")
         text.append(f"  Range: {range_label}  ", style="yellow")
         text.append(f"  Metric: {metric}  ", style="bright_blue")
@@ -454,7 +749,7 @@ class UsageExplorer:
         if summary["peak"]:
             peak = summary["peak"]
             totals.append(
-                f"Peak: {peak.get('date')} {fmt_cost(float(peak.get('totalCost', 0)))}",
+                f"Peak: {row_date(peak)} {fmt_cost(float(peak.get('totalCost', 0)))}",
                 style="bold red",
             )
         return Group(totals, estimate)
@@ -468,7 +763,7 @@ class UsageExplorer:
         if self.state.selected < self.state.viewport:
             self.state.viewport = self.state.selected
         selected_row = self.model_row_values(rows[self.state.selected], model) if rows else {}
-        selected_breakdown_count = len(selected_row.get("modelBreakdowns", [])) if self.state.expanded else 0
+        selected_breakdown_count = len(detail_items(selected_row)) if self.state.expanded and rows else 0
         selected_gap_count = 1 if selected_breakdown_count else 0
         selected_block_lines = 1 + selected_breakdown_count + selected_gap_count
         if max_lines:
@@ -480,6 +775,7 @@ class UsageExplorer:
 
         table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
         table.add_column(self.column_header("date", "Date"), no_wrap=True)
+        table.add_column(self.column_header("providers", "Provider"), no_wrap=True)
         table.add_column(self.column_header("cost", "Cost"), justify="right", no_wrap=True)
         table.add_column(self.column_header("tokens", "Total"), justify="right", no_wrap=True)
         table.add_column(self.column_header("input", "Input"), justify="right", no_wrap=True)
@@ -498,13 +794,15 @@ class UsageExplorer:
             models_text = Text()
             model_style = "black" if selected else None
             separator_style = "black" if selected else "dim"
-            for n, model_name in enumerate(row.get("modelsUsed", [])):
+            provider_text = Text(compact_providers(row_provider_names(row)), style="black" if selected else "bright_magenta")
+            for n, model_name in enumerate(row_model_names(row)):
                 if n:
                     models_text.append(", ", style=separator_style)
                 models_text.append(compact_model(model_name), style=model_style or self.model_colors.get(model_name, "white"))
             cache_tokens = int(row.get("cacheCreationTokens", 0)) + int(row.get("cacheReadTokens", 0))
             table.add_row(
-                str(row.get("date", "")),
+                row_date(row),
+                provider_text,
                 fmt_cost(float(row.get("totalCost", 0.0))),
                 fmt_int(row.get("totalTokens", 0)),
                 fmt_int(row.get("inputTokens", 0)),
@@ -516,11 +814,10 @@ class UsageExplorer:
             used_lines += 1
             if selected and self.state.expanded:
                 rendered_breakdowns = False
-                for item in row.get("modelBreakdowns", []):
+                for item in detail_items(row):
                     if used_lines >= max_lines:
                         break
                     rendered_breakdowns = True
-                    breakdown_model = item.get("modelName", "")
                     cache_create = int(item.get("cacheCreationTokens", 0))
                     cache_read = int(item.get("cacheReadTokens", 0))
                     cache_tokens = cache_create + cache_read
@@ -529,17 +826,18 @@ class UsageExplorer:
                     total_tokens = input_tokens + output_tokens + cache_tokens
                     table.add_row(
                         "",
+                        Text("  " + compact_providers(item.get("providers", [])), style="bold white"),
                         fmt_cost(float(item.get("cost", 0.0))),
                         fmt_int(total_tokens),
                         fmt_int(input_tokens),
                         fmt_int(output_tokens),
                         fmt_int(cache_tokens),
-                        Text("  " + compact_model(breakdown_model), style="bold white"),
+                        Text("  " + item.get("label", ""), style="bold white"),
                         style="white on grey15",
                     )
                     used_lines += 1
                 if rendered_breakdowns and used_lines < max_lines:
-                    table.add_row("", "", "", "", "", "", "")
+                    table.add_row("", "", "", "", "", "", "", "")
                     used_lines += 1
         return Group(table, Text(""), self.render_metrics_footer(rows))
 
@@ -566,7 +864,7 @@ class UsageExplorer:
             bar_len = int((value / max_value) * width) if max_value else 0
             bar = "█" * max(bar_len, 1 if value else 0)
             style = "green" if metric_key == "cost" else "cyan"
-            text.append(f"{row.get('date', '')} ", style="dim")
+            text.append(f"{row_date(row)} ", style="dim")
             text.append(f"{bar:<{width}} ", style=style)
             text.append((fmt.format(value) if metric_key != "cost" else fmt_cost(value)) + "\n", style="bold")
         title = f"[bold]{metric_label} Trend[/bold]"
@@ -577,27 +875,31 @@ class UsageExplorer:
     def render_detail(self, rows: List[Dict]) -> Panel:
         if not rows:
             return Panel(Text("No rows match the current filter", style="dim"), title="[bold]Detail[/bold]")
-        row = rows[self.state.selected]
+        row = self.model_row_values(rows[self.state.selected], self.selected_model())
         table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
+        table.add_column("Provider")
         table.add_column("Model")
         table.add_column("Cost", justify="right")
         table.add_column("Input", justify="right")
         table.add_column("Output", justify="right")
         table.add_column("Cache Create", justify="right")
         table.add_column("Cache Read", justify="right")
-        for item in row.get("modelBreakdowns", []):
-            model = item.get("modelName", "")
+        items = detail_items(row)
+        if not items:
+            return Panel(Text("No model breakdown available for this row", style="dim"), title=f"[bold]Model Breakdown: {row_date(row)}[/bold]", border_style="magenta")
+        for item in items:
             cache_create = int(item.get("cacheCreationTokens", 0))
             cache_read = int(item.get("cacheReadTokens", 0))
             table.add_row(
-                Text(compact_model(model), style=self.model_colors.get(model, "white")),
+                compact_providers(item.get("providers", [])),
+                Text(item.get("label", ""), style="white" if item.get("aggregate") else "bright_cyan"),
                 fmt_cost(float(item.get("cost", 0.0))),
                 fmt_int(item.get("inputTokens", 0)),
                 fmt_int(item.get("outputTokens", 0)),
                 fmt_int(cache_create),
                 fmt_int(cache_read),
             )
-        return Panel(table, title=f"[bold]Model Breakdown: {row.get('date')}[/bold]", border_style="magenta")
+        return Panel(table, title=f"[bold]Model Breakdown: {row_date(row)}[/bold]", border_style="magenta")
 
     def render_help(self) -> Panel:
         controls = Text()
@@ -607,6 +909,8 @@ class UsageExplorer:
         controls.append(" page  ")
         controls.append("tab", style="bold cyan")
         controls.append(" focus  ")
+        controls.append("a", style="bold cyan")
+        controls.append(" provider  ")
         controls.append("m", style="bold cyan")
         controls.append(" model  ")
         controls.append("esc/v", style="bold cyan")
@@ -929,10 +1233,20 @@ class UsageExplorer:
             self.state.selected = 0
         elif chars == b"G":
             self.state.selected = max(len(rows) - 1, 0)
-        elif chars == b"m":
-            self.state.model_index = (self.state.model_index + 1) % (len(self.models) + 1)
+        elif chars == b"a":
+            self.state.provider_index = (self.state.provider_index + 1) % len(self.provider_filter_options())
+            self.state.model_index = 0
             self.state.selected = 0
             self.state.viewport = 0
+            self.state.chart_offset = 0
+            self.state.expanded = False
+        elif chars == b"m":
+            models = self.available_models()
+            self.state.model_index = (self.state.model_index + 1) % (len(models) + 1)
+            self.state.selected = 0
+            self.state.viewport = 0
+            self.state.chart_offset = 0
+            self.state.expanded = False
         elif chars == b"v":
             self.open_range_menu()
         elif chars in (b" ", b"\r", b"\n"):
