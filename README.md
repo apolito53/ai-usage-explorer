@@ -10,6 +10,10 @@ Interactive terminal dashboard for Claude and Codex usage data from `ccusage`.
 
 The explorer runs provider-specific `ccusage claude` and `ccusage codex` JSON commands, then shows daily usage, a trend chart, and the selected day's model breakdown.
 
+On startup, the script checks for required Python packages. If they are missing, it creates `.venv` and installs them before launching the terminal UI.
+
+`ccusage` does not need to be installed globally. The data fetch path runs `pnpm dlx ccusage`, so `pnpm` downloads or reuses `ccusage` on demand. The script expects `nvm`, Node 22, and `pnpm` to be available in the login shell used for fetching.
+
 ## Options
 
 ```bash

@@ -17,6 +17,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 PYTHON_BIN="${VENV_DIR}/bin/python"
+REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
+PYTHON_DEP_MODULES=(rich)
 
 SINCE="20260209"
 UNTIL=""
@@ -78,9 +80,58 @@ case "$GROUP" in
     *) echo "ERROR: --group must be day or month" >&2; exit 1 ;;
 esac
 
-if [ ! -x "$PYTHON_BIN" ]; then
-    PYTHON_BIN="python3"
-fi
+find_python() {
+    if [ -x "$PYTHON_BIN" ]; then
+        return
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+        return
+    fi
+    echo "ERROR: python3 is required to run the usage explorer." >&2
+    exit 1
+}
+
+python_has_dependencies() {
+    "$PYTHON_BIN" - "${PYTHON_DEP_MODULES[@]}" <<'PY'
+import importlib.util
+import sys
+
+missing = [
+    module
+    for module in sys.argv[1:]
+    if importlib.util.find_spec(module) is None
+]
+if missing:
+    print(",".join(missing))
+    sys.exit(1)
+PY
+}
+
+ensure_python_dependencies() {
+    find_python
+    if python_has_dependencies >/dev/null; then
+        return
+    fi
+
+    echo "Installing Python dependencies into ${VENV_DIR}..." >&2
+    if [ ! -x "${VENV_DIR}/bin/python" ]; then
+        if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
+            echo "ERROR: Could not create ${VENV_DIR}. Install python3-venv or install dependencies manually." >&2
+            exit 1
+        fi
+    fi
+
+    PYTHON_BIN="${VENV_DIR}/bin/python"
+    if ! "$PYTHON_BIN" -m pip install -r "$REQUIREMENTS_FILE"; then
+        echo "ERROR: Could not install Python dependencies from ${REQUIREMENTS_FILE}." >&2
+        exit 1
+    fi
+    if ! python_has_dependencies >/dev/null; then
+        echo "ERROR: Python dependencies are still missing after installation." >&2
+        exit 1
+    fi
+}
 
 fetch_usage_data() {
     AI_USAGE_SINCE="$SINCE" \
@@ -88,7 +139,21 @@ fetch_usage_data() {
     AI_USAGE_PROJECT="$PROJECT" \
     AI_USAGE_OFFLINE="$OFFLINE" \
     bash -lic '
+        if ! command -v nvm >/dev/null 2>&1; then
+            echo "ERROR: nvm is required to run ccusage. Install nvm and Node 22, or load your shell profile before running this script." >&2
+            exit 1
+        fi
         nvm use 22 >/dev/null
+        if ! command -v pnpm >/dev/null 2>&1; then
+            if command -v corepack >/dev/null 2>&1; then
+                corepack enable pnpm >/dev/null 2>&1 || true
+            fi
+        fi
+        if ! command -v pnpm >/dev/null 2>&1; then
+            echo "ERROR: pnpm is required to run ccusage via pnpm dlx. Install pnpm or enable corepack for Node 22." >&2
+            exit 1
+        fi
+
         build_provider_args() {
             local provider="$1"
             local period="$2"
@@ -113,6 +178,7 @@ fetch_usage_data() {
         for provider in claude codex; do
             for period in daily monthly; do
                 build_provider_args "$provider" "$period"
+                # pnpm dlx downloads ccusage on demand when it is not already cached.
                 pnpm dlx ccusage "${args[@]}" > "$data_dir/$provider-$period.json"
             done
         done
@@ -247,6 +313,8 @@ if [ "$DUMP_JSON" -eq 1 ]; then
     exit 0
 fi
 
+ensure_python_dependencies
+
 DATA_FILE="$JSON_FILE"
 if [ -z "$DATA_FILE" ]; then
     DATA_FILE="$(mktemp)"
@@ -279,7 +347,7 @@ try:
     from rich.table import Table
     from rich.text import Text
 except ImportError:
-    print("ERROR: rich is required. Run ./kafka-event-visualizer.sh once to create .venv, or install rich.", file=sys.stderr)
+    print("ERROR: rich is required but could not be imported after dependency setup.", file=sys.stderr)
     sys.exit(1)
 
 
