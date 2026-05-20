@@ -14,6 +14,15 @@ On startup, the script checks for required Python packages. If they are missing,
 
 `ccusage` does not need to be installed globally. The data fetch path runs `pnpm dlx ccusage`, so `pnpm` downloads or reuses `ccusage` on demand. The script expects `nvm`, Node 22, and `pnpm` to be available in the login shell used for fetching.
 
+## Versioning and Updates
+
+```bash
+./ai-usage-explorer.sh --version
+./ai-usage-explorer.sh --no-update
+```
+
+The version is stored in `VERSION`. On startup, the script checks the current Git upstream. If the local checkout is behind and has no tracked local changes, it runs a fast-forward-only pull and restarts itself. It skips the update check when the script is not running from a Git checkout, no upstream is configured, the branch has diverged, or tracked local changes are present. Set `AI_USAGE_EXPLORER_NO_UPDATE=1` or pass `--no-update` to disable the check for a run.
+
 ## Options
 
 ```bash
@@ -21,6 +30,7 @@ On startup, the script checks for required Python packages. If they are missing,
 ./ai-usage-explorer.sh --refresh
 ./ai-usage-explorer.sh --demo
 ./ai-usage-explorer.sh --file /tmp/ccusage-daily.json
+./ai-usage-explorer.sh --version
 ```
 
 - `--since YYYYMMDD`: Start date for ccusage daily data.
@@ -30,6 +40,8 @@ On startup, the script checks for required Python packages. If they are missing,
 - `--refresh`: Fetch current model pricing instead of using `ccusage --offline`.
 - `--demo`: Load bundled demo data instead of running `ccusage`.
 - `--file PATH`: Load an existing `ccusage` JSON file.
+- `--no-update`: Skip the startup Git update check.
+- `--version`: Show the current explorer version.
 
 ## Keyboard
 

@@ -19,6 +19,9 @@ VENV_DIR="${SCRIPT_DIR}/.venv"
 PYTHON_BIN="${VENV_DIR}/bin/python"
 REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
 PYTHON_DEP_MODULES=(rich)
+VERSION_FILE="${SCRIPT_DIR}/VERSION"
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || printf '0.1.0')"
+ORIGINAL_ARGS=("$@")
 
 SINCE="20260209"
 UNTIL=""
@@ -27,6 +30,7 @@ JSON_FILE=""
 OFFLINE=1
 GROUP="day"
 DUMP_JSON=0
+NO_UPDATE="${AI_USAGE_EXPLORER_NO_UPDATE:-0}"
 
 usage() {
     cat <<'EOF'
@@ -40,6 +44,8 @@ Options:
   --refresh            Fetch current model pricing instead of ccusage --offline
   --demo               Load bundled demo data instead of running ccusage
   --file PATH          Load an existing ccusage JSON file
+  --no-update          Skip the startup git update check
+  --version            Show version and exit
   -h, --help           Show this help
 
 Keyboard:
@@ -70,6 +76,8 @@ while [[ $# -gt 0 ]]; do
         --refresh) OFFLINE=0; shift ;;
         --demo) JSON_FILE="${SCRIPT_DIR}/demo/usage-demo.json"; shift ;;
         --file) JSON_FILE="$2"; shift 2 ;;
+        --no-update) NO_UPDATE=1; shift ;;
+        --version) echo "AI Usage Explorer ${VERSION}"; exit 0 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
@@ -79,6 +87,52 @@ case "$GROUP" in
     day|month) ;;
     *) echo "ERROR: --group must be day or month" >&2; exit 1 ;;
 esac
+
+self_update() {
+    if [ "$NO_UPDATE" = "1" ]; then
+        return
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        return
+    fi
+    if ! git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        return
+    fi
+
+    local git_root upstream local_rev remote_rev base_rev
+    git_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || return
+    if [ "$git_root" != "$SCRIPT_DIR" ]; then
+        return
+    fi
+    upstream="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" || return
+    if ! git -C "$SCRIPT_DIR" fetch --quiet; then
+        echo "Update check skipped: could not fetch ${upstream}." >&2
+        return
+    fi
+
+    local_rev="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null)" || return
+    remote_rev="$(git -C "$SCRIPT_DIR" rev-parse "$upstream" 2>/dev/null)" || return
+    base_rev="$(git -C "$SCRIPT_DIR" merge-base HEAD "$upstream" 2>/dev/null)" || return
+
+    if [ "$local_rev" = "$remote_rev" ]; then
+        return
+    fi
+    if [ "$local_rev" = "$base_rev" ]; then
+        if ! git -C "$SCRIPT_DIR" diff --quiet || ! git -C "$SCRIPT_DIR" diff --cached --quiet; then
+            echo "Update available on ${upstream}, but tracked local changes are present; skipping." >&2
+            return
+        fi
+        echo "Updating AI Usage Explorer from ${local_rev:0:7} to ${remote_rev:0:7}..." >&2
+        if git -C "$SCRIPT_DIR" pull --ff-only --quiet; then
+            exec "$0" "$@"
+        fi
+        echo "Update check skipped: git pull --ff-only failed." >&2
+        return
+    fi
+    if [ "$remote_rev" != "$base_rev" ]; then
+        echo "Update check skipped: local branch has diverged from ${upstream}." >&2
+    fi
+}
 
 find_python() {
     if [ -x "$PYTHON_BIN" ]; then
@@ -309,10 +363,12 @@ PY
 }
 
 if [ "$DUMP_JSON" -eq 1 ]; then
+    self_update "${ORIGINAL_ARGS[@]}"
     fetch_usage_data
     exit 0
 fi
 
+self_update "${ORIGINAL_ARGS[@]}"
 ensure_python_dependencies
 
 DATA_FILE="$JSON_FILE"
