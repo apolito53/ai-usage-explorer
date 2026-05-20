@@ -46,7 +46,7 @@ Keyboard:
   tab                  Switch day list / chart focus
   g/G                  Jump to first/last day
   a                    Cycle provider filter
-  m                    Cycle model filter
+  m                    Open model filter menu
   p                    Toggle day/month grouping
   esc or v             Open date range menu
   space/enter          Expand selected row model breakdown
@@ -266,9 +266,9 @@ import sys
 import termios
 import threading
 import tty
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 try:
     from rich.align import Align
@@ -389,11 +389,6 @@ def infer_model_provider(model: str) -> Optional[str]:
     return None
 
 
-def model_matches_provider(model: str, provider: str, row_providers: List[str]) -> bool:
-    model_provider = infer_model_provider(model)
-    return model_provider == provider or (model_provider is None and provider in row_providers)
-
-
 def row_model_names(row: Dict) -> List[str]:
     breakdowns = [
         item.get("modelName")
@@ -464,7 +459,13 @@ def detail_items(row: Dict) -> List[Dict]:
 class State:
     selected: int = 0
     provider_index: int = 0
-    model_index: int = 0
+    # Empty means "all models"; the modal below edits a draft so Esc can cancel.
+    selected_models: Set[str] = field(default_factory=set)
+    model_menu_open: bool = False
+    model_menu_index: int = 0
+    model_menu_viewport: int = 0
+    # Draft model selection copied from selected_models when the picker opens.
+    model_menu_selection: Set[str] = field(default_factory=set)
     sort_key: str = "date"
     sort_desc: bool = True
     metric_index: int = 0
@@ -513,7 +514,7 @@ class UsageExplorer:
         self.models = self._models()
         self.model_colors = {m: MODEL_COLORS[i % len(MODEL_COLORS)] for i, m in enumerate(self.models)}
         self.state.provider_index = min(self.state.provider_index, len(self.provider_filter_options()) - 1)
-        self.state.model_index = min(self.state.model_index, len(self.available_models()))
+        self.state.selected_models &= set(self.models)
         self.state.selected = 0
         self.state.viewport = 0
         self.state.chart_offset = 0
@@ -563,34 +564,17 @@ class UsageExplorer:
             return len(providers) > 1
         return providers == [key]
 
-    def selected_provider(self) -> Optional[str]:
-        key, _label = self.selected_provider_filter()
-        if key in self.providers:
-            return key
-        return None
+    def selected_models(self) -> Set[str]:
+        # Provider and model filters are independent; filtering applies both at render time.
+        return self.state.selected_models & set(self.models)
 
-    def available_models(self) -> List[str]:
-        provider = self.selected_provider()
-        seen = []
-        for row in self.rows:
-            row_providers = row_provider_names(row)
-            if not self.row_matches_provider_filter(row):
-                continue
-            for model in row_model_names(row):
-                if provider and not model_matches_provider(model, provider, row_providers):
-                    continue
-                if model not in seen:
-                    seen.append(model)
-        return sorted(seen)
-
-    def selected_model(self) -> Optional[str]:
-        models = self.available_models()
-        if self.state.model_index == 0:
-            return None
-        if self.state.model_index > len(models):
-            self.state.model_index = 0
-            return None
-        return models[self.state.model_index - 1]
+    def model_filter_label(self) -> str:
+        models = sorted(self.selected_models())
+        if not models:
+            return "All"
+        if len(models) == 1:
+            return compact_model(models[0])
+        return f"{len(models)} selected"
 
     def date_range_start(self) -> Optional[datetime]:
         today = datetime.now()
@@ -612,7 +596,7 @@ class UsageExplorer:
         return None
 
     def filtered_rows(self) -> List[Dict]:
-        model = self.selected_model()
+        models = self.selected_models()
         rows = self.rows
         start = self.date_range_start()
         end = self.date_range_end()
@@ -627,15 +611,15 @@ class UsageExplorer:
             row for row in rows
             if self.row_matches_provider_filter(row)
         ]
-        if model:
+        if models:
             rows = [
                 row for row in rows
-                if model in row_model_names(row)
+                if models.intersection(row_model_names(row))
             ]
 
         key = self.state.sort_key
         def sorter(row: Dict):
-            effective = self.model_row_values(row, model)
+            effective = self.model_row_values(row, models)
             if key == "cost":
                 return float(effective.get("totalCost", 0.0))
             if key == "tokens":
@@ -654,35 +638,46 @@ class UsageExplorer:
 
         return sorted(rows, key=sorter, reverse=self.state.sort_desc)
 
-    def model_row_values(self, row: Dict, model: Optional[str]) -> Dict:
-        if not model:
+    def model_row_values(self, row: Dict, models: Set[str]) -> Dict:
+        if not models:
             return row
-        for item in row.get("modelBreakdowns", []):
-            if item.get("modelName") == model:
-                return {
-                    "date": row_date(row),
-                    "inputTokens": item.get("inputTokens", 0),
-                    "outputTokens": item.get("outputTokens", 0),
-                    "cacheCreationTokens": item.get("cacheCreationTokens", 0),
-                    "cacheReadTokens": item.get("cacheReadTokens", 0),
-                    "totalTokens": (
-                        int(item.get("inputTokens", 0))
-                        + int(item.get("outputTokens", 0))
-                        + int(item.get("cacheCreationTokens", 0))
-                        + int(item.get("cacheReadTokens", 0))
-                    ),
-                    "totalCost": item.get("cost", 0.0),
-                    "providers": [infer_model_provider(model)] if infer_model_provider(model) else row_provider_names(row),
-                    "modelsUsed": [model],
-                    "modelBreakdowns": [item],
-                }
-        if model in row_model_names(row):
+        matched = [
+            item for item in row.get("modelBreakdowns", [])
+            if item.get("modelName") in models
+        ]
+        if matched:
+            input_tokens = sum(int(item.get("inputTokens", 0)) for item in matched)
+            output_tokens = sum(int(item.get("outputTokens", 0)) for item in matched)
+            cache_creation_tokens = sum(int(item.get("cacheCreationTokens", 0)) for item in matched)
+            cache_read_tokens = sum(int(item.get("cacheReadTokens", 0)) for item in matched)
+            matched_models = [
+                item.get("modelName")
+                for item in matched
+                if item.get("modelName")
+            ]
+            matched_providers = ordered_providers(list({
+                provider for provider in (infer_model_provider(model) for model in matched_models)
+                if provider
+            }))
+            return {
+                "date": row_date(row),
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cacheCreationTokens": cache_creation_tokens,
+                "cacheReadTokens": cache_read_tokens,
+                "totalTokens": input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens,
+                "totalCost": sum(float(item.get("cost", 0.0)) for item in matched),
+                "providers": matched_providers or row_provider_names(row),
+                "modelsUsed": matched_models,
+                "modelBreakdowns": matched,
+            }
+        if models.intersection(row_model_names(row)):
             return row
         return row
 
     def summary(self, rows: List[Dict]) -> Dict:
-        model = self.selected_model()
-        effective = [self.model_row_values(row, model) for row in rows]
+        models = self.selected_models()
+        effective = [self.model_row_values(row, models) for row in rows]
         total_cost = sum(float(row.get("totalCost", 0.0)) for row in effective)
         total_tokens = sum(int(row.get("totalTokens", 0)) for row in effective)
         days = len(effective)
@@ -700,7 +695,6 @@ class UsageExplorer:
         return SPINNER_FRAMES[self.state.spinner_index % len(SPINNER_FRAMES)]
 
     def render_header(self, rows: List[Dict]) -> Panel:
-        model = self.selected_model()
         metric = METRICS[self.state.metric_index][1]
         sort_label = SORT_LABELS.get(self.state.sort_key, self.state.sort_key).lower()
         sort_arrow = "▼" if self.state.sort_desc else "▲"
@@ -710,7 +704,7 @@ class UsageExplorer:
         text = Text()
         text.append(" AI Usage Explorer ", style="bold white on blue")
         text.append(f"  Provider: {self.selected_provider_label()}  ", style="bright_magenta")
-        text.append(f"  Model: {compact_model(model) if model else 'All'}  ", style="magenta")
+        text.append(f"  Models: {self.model_filter_label()}  ", style="magenta")
         text.append(f"  Range: {range_label}  ", style="yellow")
         text.append(f"  Metric: {metric}  ", style="bright_blue")
         text.append(f"  Sort: {sort_label} {sort_arrow}  ", style="white")
@@ -755,14 +749,14 @@ class UsageExplorer:
         return Group(totals, estimate)
 
     def render_days(self, rows: List[Dict], height: int) -> Group:
-        model = self.selected_model()
+        models = self.selected_models()
         max_lines = max(height - 6, 0)
         self.page_size = max(max_lines, 1)
         if self.state.selected >= len(rows):
             self.state.selected = max(0, len(rows) - 1)
         if self.state.selected < self.state.viewport:
             self.state.viewport = self.state.selected
-        selected_row = self.model_row_values(rows[self.state.selected], model) if rows else {}
+        selected_row = self.model_row_values(rows[self.state.selected], models) if rows else {}
         selected_breakdown_count = len(detail_items(selected_row)) if self.state.expanded and rows else 0
         selected_gap_count = 1 if selected_breakdown_count else 0
         selected_block_lines = 1 + selected_breakdown_count + selected_gap_count
@@ -788,7 +782,7 @@ class UsageExplorer:
             if used_lines >= max_lines:
                 break
             original = rows[absolute]
-            row = self.model_row_values(original, model)
+            row = self.model_row_values(original, models)
             selected = absolute == self.state.selected
             row_style = "bold black on bright_white" if selected else ""
             models_text = Text()
@@ -842,9 +836,9 @@ class UsageExplorer:
         return Group(table, Text(""), self.render_metrics_footer(rows))
 
     def chart_rows(self, rows: List[Dict]) -> List[Dict]:
-        model = self.selected_model()
+        models = self.selected_models()
         return [
-            self.model_row_values(row, model)
+            self.model_row_values(row, models)
             for row in rows
         ]
 
@@ -875,7 +869,7 @@ class UsageExplorer:
     def render_detail(self, rows: List[Dict]) -> Panel:
         if not rows:
             return Panel(Text("No rows match the current filter", style="dim"), title="[bold]Detail[/bold]")
-        row = self.model_row_values(rows[self.state.selected], self.selected_model())
+        row = self.model_row_values(rows[self.state.selected], self.selected_models())
         table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
         table.add_column("Provider")
         table.add_column("Model")
@@ -912,7 +906,7 @@ class UsageExplorer:
         controls.append("a", style="bold cyan")
         controls.append(" provider  ")
         controls.append("m", style="bold cyan")
-        controls.append(" model  ")
+        controls.append(" models  ")
         controls.append("esc/v", style="bold cyan")
         controls.append(" range  ")
         controls.append("space", style="bold cyan")
@@ -929,6 +923,77 @@ class UsageExplorer:
         controls.append(" quit")
         note = Text("Estimated actual cost applies a 1.3x multiplier to ccusage cost.", style="dim")
         return Panel(Group(Align.center(controls), Align.center(note)), border_style="dim")
+
+    def model_menu_items(self) -> List[Dict]:
+        items = [{"type": "all", "label": "All models"}]
+        grouped = {}
+        for model in self.models:
+            provider = infer_model_provider(model) or "other"
+            grouped.setdefault(provider, []).append(model)
+
+        for provider in ordered_providers(list(grouped.keys())):
+            items.append({"type": "header", "label": compact_provider(provider)})
+            for model in sorted(grouped[provider]):
+                items.append({"type": "model", "model": model, "label": compact_model(model)})
+        return items
+
+    def model_menu_selectable_indices(self) -> List[int]:
+        return [
+            idx for idx, item in enumerate(self.model_menu_items())
+            if item.get("type") != "header"
+        ]
+
+    def move_model_menu(self, delta: int):
+        selectable = self.model_menu_selectable_indices()
+        if not selectable:
+            self.state.model_menu_index = 0
+            return
+        try:
+            position = selectable.index(self.state.model_menu_index)
+        except ValueError:
+            position = 0
+        position = max(0, min(position + delta, len(selectable) - 1))
+        self.state.model_menu_index = selectable[position]
+
+    def render_model_menu(self) -> Panel:
+        items = self.model_menu_items()
+        selectable = self.model_menu_selectable_indices()
+        if selectable and self.state.model_menu_index not in selectable:
+            self.state.model_menu_index = selectable[0]
+
+        visible_rows = max(min((self.console.height or 32) - 10, 16), 6)
+        max_offset = max(len(items) - visible_rows, 0)
+        if self.state.model_menu_index < self.state.model_menu_viewport:
+            self.state.model_menu_viewport = self.state.model_menu_index
+        if self.state.model_menu_index >= self.state.model_menu_viewport + visible_rows:
+            self.state.model_menu_viewport = self.state.model_menu_index - visible_rows + 1
+        self.state.model_menu_viewport = max(0, min(self.state.model_menu_viewport, max_offset))
+
+        table = Table(show_header=False, box=None, expand=True)
+        table.add_column("Model")
+        for idx in range(self.state.model_menu_viewport, min(len(items), self.state.model_menu_viewport + visible_rows)):
+            item = items[idx]
+            selected = idx == self.state.model_menu_index
+            row_style = "bold black on bright_white" if selected else ""
+            if item["type"] == "header":
+                table.add_row(Text(item["label"], style="bold bright_magenta"))
+                continue
+            if item["type"] == "all":
+                marker = "[x]" if not self.state.model_menu_selection else "[ ]"
+                table.add_row(f"{marker} {item['label']}", style=row_style)
+                continue
+            marker = "[x]" if item["model"] in self.state.model_menu_selection else "[ ]"
+            table.add_row(f"{marker} {item['label']}", style=row_style)
+
+        subtitle = "space toggle • a all • enter apply • esc cancel"
+        return Panel(
+            table,
+            title="[bold]Model Filter[/bold]",
+            subtitle=subtitle,
+            border_style="magenta",
+            expand=False,
+            width=min(78, max((self.console.width or 80) - 8, 34)),
+        )
 
     def render_range_menu(self) -> Panel:
         table = Table(show_header=False, box=None, expand=True)
@@ -1017,6 +1082,50 @@ class UsageExplorer:
         self.state.viewport = 0
         self.state.expanded = False
         self.close_range_menu()
+
+    def open_model_menu(self):
+        self.state.model_menu_open = True
+        # Work against a draft copy; applying commits it, closing discards it.
+        self.state.model_menu_selection = set(self.selected_models())
+        self.state.model_menu_viewport = 0
+        items = self.model_menu_items()
+        self.state.model_menu_index = 0
+        if self.state.model_menu_selection:
+            first_selected = next(
+                (
+                    idx for idx, item in enumerate(items)
+                    if item.get("type") == "model" and item.get("model") in self.state.model_menu_selection
+                ),
+                0,
+            )
+            self.state.model_menu_index = first_selected
+
+    def close_model_menu(self):
+        self.state.model_menu_open = False
+
+    def toggle_model_menu_selection(self):
+        items = self.model_menu_items()
+        if not items:
+            return
+        item = items[self.state.model_menu_index]
+        if item["type"] == "all":
+            self.state.model_menu_selection.clear()
+            return
+        if item["type"] != "model":
+            return
+        model = item["model"]
+        if model in self.state.model_menu_selection:
+            self.state.model_menu_selection.remove(model)
+        else:
+            self.state.model_menu_selection.add(model)
+
+    def apply_model_menu(self):
+        self.state.selected_models = self.state.model_menu_selection & set(self.models)
+        self.state.selected = 0
+        self.state.viewport = 0
+        self.state.chart_offset = 0
+        self.state.expanded = False
+        self.close_model_menu()
 
     def fetch_refresh_data(self) -> Dict:
         if self.file_path:
@@ -1107,6 +1216,18 @@ class UsageExplorer:
             layout["help"].update(self.render_help())
             return layout
 
+        if self.state.model_menu_open:
+            layout = Layout()
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="body", ratio=1),
+                Layout(name="help", size=4),
+            )
+            layout["header"].update(self.render_header(rows))
+            layout["body"].update(Align.center(self.render_model_menu(), vertical="middle"))
+            layout["help"].update(self.render_help())
+            return layout
+
         if self.state.range_menu_open:
             layout = Layout()
             layout.split_column(
@@ -1144,6 +1265,29 @@ class UsageExplorer:
             return
 
         rows = self.filtered_rows()
+        if self.state.model_menu_open:
+            if chars in (b"\x03",):
+                self.running = False
+                return
+            if chars in (b"\x1b", b"m"):
+                self.close_model_menu()
+            elif chars in (b"j", b"\x1b[B"):
+                self.move_model_menu(1)
+            elif chars in (b"k", b"\x1b[A"):
+                self.move_model_menu(-1)
+            elif chars == b"\x1b[6~":
+                self.move_model_menu(self.page_size)
+            elif chars == b"\x1b[5~":
+                self.move_model_menu(-self.page_size)
+            elif chars == b"a":
+                self.state.model_menu_selection.clear()
+                self.state.model_menu_index = 0
+            elif chars == b" ":
+                self.toggle_model_menu_selection()
+            elif chars in (b"\r", b"\n"):
+                self.apply_model_menu()
+            return
+
         if self.state.range_menu_open:
             if chars in (b"\x03",):
                 self.running = False
@@ -1235,18 +1379,12 @@ class UsageExplorer:
             self.state.selected = max(len(rows) - 1, 0)
         elif chars == b"a":
             self.state.provider_index = (self.state.provider_index + 1) % len(self.provider_filter_options())
-            self.state.model_index = 0
             self.state.selected = 0
             self.state.viewport = 0
             self.state.chart_offset = 0
             self.state.expanded = False
         elif chars == b"m":
-            models = self.available_models()
-            self.state.model_index = (self.state.model_index + 1) % (len(models) + 1)
-            self.state.selected = 0
-            self.state.viewport = 0
-            self.state.chart_offset = 0
-            self.state.expanded = False
+            self.open_model_menu()
         elif chars == b"v":
             self.open_range_menu()
         elif chars in (b" ", b"\r", b"\n"):

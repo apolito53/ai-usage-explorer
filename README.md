@@ -34,8 +34,8 @@ The explorer runs provider-specific `ccusage claude` and `ccusage codex` JSON co
 - `tab`: Switch focus between the day list and trend chart.
 - `g` / `G`: Jump to first / last day.
 - `a`: Cycle provider filter (`Claude`, `Codex`, mixed, or all detected providers).
-- `m`: Cycle model filter.
-- `v`: Open date range filter. Defaults to month to date. Custom ranges use `YYYY-MM-DD..YYYY-MM-DD`.
+- `m`: Open the multi-select model filter grouped by detected provider. In the picker, `space` toggles a model, `a` selects all models, `enter` applies, and `esc` cancels.
+- `esc` / `v`: Open date range filter. Defaults to month to date. Custom ranges use `YYYY-MM-DD..YYYY-MM-DD`.
 - `space` / `enter`: Expand selected row model breakdown.
 - `←/→`: Cycle sort column (prev/next).
 - `s`: Reverse sort order.
