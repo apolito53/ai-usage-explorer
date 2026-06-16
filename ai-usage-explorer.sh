@@ -306,8 +306,8 @@ def normalize_codex_row(row, period):
             "modelName": model_name,
             "inputTokens": int_value(values, "inputTokens"),
             "outputTokens": int_value(values, "outputTokens"),
-            "cacheCreationTokens": 0,
-            "cacheReadTokens": int_value(values, "cachedInputTokens"),
+            "cacheCreationTokens": int_value(values, "cacheCreationTokens"),
+            "cacheReadTokens": int_value(values, "cacheReadTokens") or int_value(values, "cachedInputTokens"),
             "cost": model_cost,
         })
 
@@ -318,8 +318,8 @@ def normalize_codex_row(row, period):
         "agent": "codex",
         "inputTokens": int_value(row, "inputTokens"),
         "outputTokens": int_value(row, "outputTokens"),
-        "cacheCreationTokens": 0,
-        "cacheReadTokens": int_value(row, "cachedInputTokens"),
+        "cacheCreationTokens": int_value(row, "cacheCreationTokens"),
+        "cacheReadTokens": int_value(row, "cacheReadTokens") or int_value(row, "cachedInputTokens"),
         "totalTokens": int_value(row, "totalTokens"),
         "totalCost": total_cost,
         "modelsUsed": list(models.keys()),
@@ -384,6 +384,7 @@ fi
 import json
 import os
 import queue
+import re
 import select
 import subprocess
 import sys
@@ -449,6 +450,7 @@ DATE_RANGES = [
 DATE_RANGE_LABELS = {key: label for key, label, _kind in DATE_RANGES}
 DATE_RANGE_KEYS = [key for key, _label, _kind in DATE_RANGES]
 SPINNER_FRAMES = ["|", "/", "-", "\\"]
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def compact_model(name: str) -> str:
@@ -472,6 +474,53 @@ def fmt_int(value: float) -> str:
 
 def fmt_cost(value: float) -> str:
     return f"${value:,.2f}"
+
+
+def read_rtk_gain() -> Optional[Dict]:
+    try:
+        result = subprocess.run(
+            ["rtk", "gain"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    stats = {"commands": []}
+    in_command_table = False
+    for raw_line in ANSI_ESCAPE.sub("", result.stdout).splitlines():
+        line_text = raw_line.rstrip()
+        line = " ".join(raw_line.split())
+        if line.startswith("Total commands:"):
+            stats["total_commands"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Input tokens:"):
+            stats["input_tokens"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Output tokens:"):
+            stats["output_tokens"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Tokens saved:"):
+            stats["tokens_saved"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Total exec time:"):
+            stats["exec_time"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Efficiency meter:"):
+            meter = line.split(":", 1)[1].strip()
+            stats["efficiency"] = meter.split()[-1] if meter else ""
+        elif line == "By Command":
+            in_command_table = True
+        elif in_command_table:
+            match = re.match(
+                r"^\s*\d+\.\s+(?P<command>.*?)\s{2,}(?P<count>\d+)\s+(?P<saved>\S+)\s+(?P<avg>\S+)\s+(?P<time>\S+)\s+",
+                line_text,
+            )
+            if match:
+                stats["commands"].append(match.groupdict())
+
+    if not stats.get("tokens_saved") and not stats["commands"]:
+        return None
+    return stats
 
 
 def parse_row_date(value: str) -> Optional[datetime]:
@@ -623,6 +672,7 @@ class UsageExplorer:
         self.project = project
         self.offline = offline
         self.state = State()
+        self.rtk_gain = read_rtk_gain()
         self.load_data(data)
         self.running = True
         self._tty = None
@@ -858,19 +908,13 @@ class UsageExplorer:
         totals.append(f"Cost: {fmt_cost(summary['cost'])}  ", style="bold green")
         totals.append(f"Tokens: {fmt_int(summary['tokens'])}  ", style="bold cyan")
         totals.append(f"Avg/day: {fmt_cost(summary['avg_cost'])}  ", style="bold yellow")
-        estimate = Text()
-        estimate.append(" EST ACTUAL ", style="bold black on bright_yellow")
-        estimate.append(
-            f"  {fmt_cost(summary['cost'] * 1.3)}",
-            style="bold yellow",
-        )
         if summary["peak"]:
             peak = summary["peak"]
             totals.append(
                 f"Peak: {row_date(peak)} {fmt_cost(float(peak.get('totalCost', 0)))}",
                 style="bold red",
             )
-        return Group(totals, estimate)
+        return Group(totals)
 
     def render_days(self, rows: List[Dict], height: int) -> Group:
         models = self.selected_models()
@@ -1019,6 +1063,41 @@ class UsageExplorer:
             )
         return Panel(table, title=f"[bold]Model Breakdown: {row_date(row)}[/bold]", border_style="magenta")
 
+    def render_rtk_gain(self) -> Panel:
+        if not self.rtk_gain:
+            return Panel(Text("rtk gain unavailable", style="dim"), title="[bold]RTK Gain[/bold]", border_style="bright_blue")
+
+        stats = self.rtk_gain
+        summary = Text()
+        summary.append("Saved ", style="dim")
+        summary.append(str(stats.get("tokens_saved", "Unknown")), style="bold bright_blue")
+        if stats.get("total_commands"):
+            summary.append(f"\nCommands {stats['total_commands']}", style="white")
+        if stats.get("exec_time"):
+            summary.append(f"  Time {stats['exec_time']}", style="dim")
+        if stats.get("efficiency"):
+            summary.append(f"\nEfficiency {stats['efficiency']}", style="bright_green")
+
+        commands = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
+        commands.add_column("Command", overflow="ellipsis", no_wrap=True)
+        commands.add_column("Saved", justify="right", no_wrap=True)
+        commands.add_column("Avg", justify="right", no_wrap=True)
+        for command in stats.get("commands", [])[:3]:
+            commands.add_row(
+                command.get("command", ""),
+                command.get("saved", ""),
+                command.get("avg", ""),
+            )
+
+        content = [summary]
+        if stats.get("commands"):
+            content.extend([Text(""), commands])
+        return Panel(
+            Group(*content),
+            title="[bold]RTK Gain[/bold]",
+            border_style="bright_blue",
+        )
+
     def render_help(self) -> Panel:
         controls = Text()
         controls.append("j/k/↑↓", style="bold cyan")
@@ -1045,8 +1124,7 @@ class UsageExplorer:
         controls.append(" metric  ")
         controls.append("q", style="bold cyan")
         controls.append(" quit")
-        note = Text("Estimated actual cost applies a 1.3x multiplier to ccusage cost.", style="dim")
-        return Panel(Group(Align.center(controls), Align.center(note)), border_style="dim")
+        return Panel(Align.center(controls), border_style="dim")
 
     def model_menu_items(self) -> List[Dict]:
         items = [{"type": "all", "label": "All models"}]
@@ -1093,23 +1171,25 @@ class UsageExplorer:
             self.state.model_menu_viewport = self.state.model_menu_index - visible_rows + 1
         self.state.model_menu_viewport = max(0, min(self.state.model_menu_viewport, max_offset))
 
+        all_models = set(self.models)
         table = Table(show_header=False, box=None, expand=True)
-        table.add_column("Model")
+        table.add_column("Selected", width=3, no_wrap=True)
+        table.add_column("Model", overflow="ellipsis", no_wrap=True)
         for idx in range(self.state.model_menu_viewport, min(len(items), self.state.model_menu_viewport + visible_rows)):
             item = items[idx]
             selected = idx == self.state.model_menu_index
             row_style = "bold black on bright_white" if selected else ""
             if item["type"] == "header":
-                table.add_row(Text(item["label"], style="bold bright_magenta"))
+                table.add_row(Text(""), Text(item["label"], style="bold bright_magenta"))
                 continue
             if item["type"] == "all":
-                marker = "[x]" if not self.state.model_menu_selection else "[ ]"
-                table.add_row(f"{marker} {item['label']}", style=row_style)
+                marker = "[x]" if self.state.model_menu_selection == all_models else "[ ]"
+                table.add_row(Text(marker), item["label"], style=row_style)
                 continue
             marker = "[x]" if item["model"] in self.state.model_menu_selection else "[ ]"
-            table.add_row(f"{marker} {item['label']}", style=row_style)
+            table.add_row(Text(marker), item["label"], style=row_style)
 
-        subtitle = "space toggle • a all • enter apply • esc cancel"
+        subtitle = "space toggle • a select all • enter apply • esc cancel"
         return Panel(
             table,
             title="[bold]Model Filter[/bold]",
@@ -1209,16 +1289,17 @@ class UsageExplorer:
 
     def open_model_menu(self):
         self.state.model_menu_open = True
-        # Work against a draft copy; applying commits it, closing discards it.
-        self.state.model_menu_selection = set(self.selected_models())
+        # Work against an explicit draft selection so checked rows always mean included.
+        applied_models = set(self.selected_models())
+        self.state.model_menu_selection = applied_models or set(self.models)
         self.state.model_menu_viewport = 0
         items = self.model_menu_items()
         self.state.model_menu_index = 0
-        if self.state.model_menu_selection:
+        if applied_models:
             first_selected = next(
                 (
                     idx for idx, item in enumerate(items)
-                    if item.get("type") == "model" and item.get("model") in self.state.model_menu_selection
+                    if item.get("type") == "model" and item.get("model") in applied_models
                 ),
                 0,
             )
@@ -1233,18 +1314,20 @@ class UsageExplorer:
             return
         item = items[self.state.model_menu_index]
         if item["type"] == "all":
-            self.state.model_menu_selection.clear()
+            self.state.model_menu_selection = set(self.models)
             return
         if item["type"] != "model":
             return
         model = item["model"]
         if model in self.state.model_menu_selection:
-            self.state.model_menu_selection.remove(model)
+            if len(self.state.model_menu_selection) > 1:
+                self.state.model_menu_selection.remove(model)
         else:
             self.state.model_menu_selection.add(model)
 
     def apply_model_menu(self):
-        self.state.selected_models = self.state.model_menu_selection & set(self.models)
+        selected = self.state.model_menu_selection & set(self.models)
+        self.state.selected_models = set() if selected == set(self.models) else selected
         self.state.selected = 0
         self.state.viewport = 0
         self.state.chart_offset = 0
@@ -1296,8 +1379,10 @@ class UsageExplorer:
             self.state.refreshing = False
             if status == "ok":
                 self.load_data(payload)
+                self.rtk_gain = read_rtk_gain()
                 self.state.status = "Refreshed " + datetime.now().strftime("%H:%M:%S")
             else:
+                self.rtk_gain = read_rtk_gain()
                 self.state.status = f"Refresh failed: {payload}"
         return updated
 
@@ -1364,7 +1449,7 @@ class UsageExplorer:
             layout["help"].update(self.render_help())
             return layout
 
-        detail_height = max(8, min(13, console_height // 3))
+        detail_height = max(10, min(14, console_height // 3))
         body_height = max(3, console_height - 3 - detail_height - 4)
         layout = Layout()
         layout.split_column(
@@ -1380,7 +1465,9 @@ class UsageExplorer:
             days_title += " [bold yellow](focused)[/bold yellow]"
         layout["days"].update(Panel(self.render_days(rows, body_height), title=days_title, border_style="bright_yellow" if self.state.focus == "days" else "cyan"))
         layout["chart"].update(self.render_chart(rows, body_height))
-        layout["detail"].update(self.render_detail(rows))
+        layout["detail"].split_row(Layout(name="breakdown", ratio=2), Layout(name="rtk", size=42))
+        layout["breakdown"].update(self.render_detail(rows))
+        layout["rtk"].update(self.render_rtk_gain())
         layout["help"].update(self.render_help())
         return layout
 
@@ -1404,7 +1491,7 @@ class UsageExplorer:
             elif chars == b"\x1b[5~":
                 self.move_model_menu(-self.page_size)
             elif chars == b"a":
-                self.state.model_menu_selection.clear()
+                self.state.model_menu_selection = set(self.models)
                 self.state.model_menu_index = 0
             elif chars == b" ":
                 self.toggle_model_menu_selection()
