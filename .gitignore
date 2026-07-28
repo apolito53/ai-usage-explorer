@@ -1,2 +1,3 @@
 .venv/
 __pycache__/
+.ai-usage-pricing-history.json

@@ -8,7 +8,9 @@ Interactive terminal dashboard for Claude and Codex usage data from `ccusage`.
 ./ai-usage-explorer.sh
 ```
 
-The explorer runs provider-specific `ccusage claude` and `ccusage codex` JSON commands, then shows daily usage, a trend chart, and the selected day's model breakdown.
+The explorer runs provider-specific `ccusage claude` and `ccusage codex` JSON commands, then shows daily usage, a trend chart, and token price rates for the selected day's models.
+
+On startup, the explorer checks current token price cards and stores dated snapshots in `.ai-usage-pricing-history.json`. The `Token Rates` panel uses the snapshot active on the selected row date so historical views do not silently use newer prices.
 
 When `rtk` is available, the bottom row includes an `RTK Gain` panel with current token savings from `rtk gain`.
 
@@ -43,6 +45,7 @@ The version is stored in `VERSION`. On startup, the script checks the current Gi
 - `--demo`: Load bundled demo data instead of running `ccusage`.
 - `--file PATH`: Load an existing `ccusage` JSON file.
 - `--no-update`: Skip the startup Git update check.
+- `--no-pricing-update`: Skip the startup token price check.
 - `--version`: Show the current explorer version.
 
 ## Keyboard

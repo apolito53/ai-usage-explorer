@@ -21,6 +21,7 @@ REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
 PYTHON_DEP_MODULES=(rich)
 VERSION_FILE="${SCRIPT_DIR}/VERSION"
 VERSION="$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || printf '0.1.0')"
+PRICING_HISTORY_FILE="${AI_USAGE_EXPLORER_PRICING_HISTORY:-${SCRIPT_DIR}/.ai-usage-pricing-history.json}"
 ORIGINAL_ARGS=("$@")
 
 SINCE="20260209"
@@ -31,6 +32,7 @@ OFFLINE=1
 GROUP="day"
 DUMP_JSON=0
 NO_UPDATE="${AI_USAGE_EXPLORER_NO_UPDATE:-0}"
+NO_PRICING_UPDATE="${AI_USAGE_EXPLORER_NO_PRICING_UPDATE:-0}"
 
 usage() {
     cat <<'EOF'
@@ -45,6 +47,7 @@ Options:
   --demo               Load bundled demo data instead of running ccusage
   --file PATH          Load an existing ccusage JSON file
   --no-update          Skip the startup git update check
+  --no-pricing-update  Skip the startup token price check
   --version            Show version and exit
   -h, --help           Show this help
 
@@ -77,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --demo) JSON_FILE="${SCRIPT_DIR}/demo/usage-demo.json"; shift ;;
         --file) JSON_FILE="$2"; shift 2 ;;
         --no-update) NO_UPDATE=1; shift ;;
+        --no-pricing-update) NO_PRICING_UPDATE=1; shift ;;
         --version) echo "AI Usage Explorer ${VERSION}"; exit 0 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -362,6 +366,205 @@ PY
     '
 }
 
+refresh_pricing_history() {
+    if [ "$NO_PRICING_UPDATE" = "1" ]; then
+        return
+    fi
+    find_python
+    "$PYTHON_BIN" - "$PRICING_HISTORY_FILE" "${1:-}" <<'PY' || echo "Pricing update skipped; using cached rates if available." >&2
+import json
+import os
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from datetime import date, datetime, timezone
+
+HISTORY_PATH = sys.argv[1]
+USAGE_PATH = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else ""
+SOURCE_URL = os.environ.get(
+    "AI_USAGE_EXPLORER_PRICING_URL",
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+)
+
+
+def builtin_price_cards():
+    return {
+        "claude-fable-5": {"input": 10.0, "output": 50.0, "cacheWrite": 12.5, "cacheRead": 1.0},
+        "claude-mythos-5": {"input": 10.0, "output": 50.0, "cacheWrite": 12.5, "cacheRead": 1.0},
+        "claude-opus-5": {"input": 5.0, "output": 25.0, "cacheWrite": 6.25, "cacheRead": 0.5},
+        "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cacheWrite": 6.25, "cacheRead": 0.5},
+        "claude-opus-4-7": {"input": 5.0, "output": 25.0, "cacheWrite": 6.25, "cacheRead": 0.5},
+        "claude-opus-4-6": {"input": 5.0, "output": 25.0, "cacheWrite": 6.25, "cacheRead": 0.5},
+        "claude-opus-4-5": {"input": 5.0, "output": 25.0, "cacheWrite": 6.25, "cacheRead": 0.5},
+        "claude-opus-4-1": {"input": 15.0, "output": 75.0, "cacheWrite": 18.75, "cacheRead": 1.5},
+        "claude-opus-4": {"input": 15.0, "output": 75.0, "cacheWrite": 18.75, "cacheRead": 1.5},
+        "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cacheWrite": 3.75, "cacheRead": 0.3},
+        "claude-sonnet-4-5": {"input": 3.0, "output": 15.0, "cacheWrite": 3.75, "cacheRead": 0.3},
+        "claude-sonnet-4": {"input": 3.0, "output": 15.0, "cacheWrite": 3.75, "cacheRead": 0.3},
+        "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cacheWrite": 1.25, "cacheRead": 0.1},
+        "claude-haiku-3-5": {"input": 0.8, "output": 4.0, "cacheWrite": 1.0, "cacheRead": 0.08},
+        "gpt-5.5": {"input": 5.0, "output": 30.0, "cacheRead": 0.5},
+        "gpt-5.4": {"input": 2.5, "output": 15.0, "cacheRead": 0.25},
+        "gpt-5.4-mini": {"input": 0.75, "output": 4.5, "cacheRead": 0.075},
+    }
+
+
+def simplify_model_name(name):
+    value = str(name or "").strip().lower()
+    for prefix in ("anthropic/", "openai/", "azure/", "bedrock/", "vertex_ai/"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    for suffix in ("-20251001", "-20250929"):
+        value = value.replace(suffix, "")
+    return value.replace("_", "-")
+
+
+def load_usage_models(path):
+    models = set()
+    if not path:
+        return models
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return models
+    for section in ("daily", "monthly"):
+        for row in data.get(section, []):
+            for model in row.get("modelsUsed", []) or []:
+                models.add(simplify_model_name(model))
+            for item in row.get("modelBreakdowns", []) or []:
+                if item.get("modelName"):
+                    models.add(simplify_model_name(item["modelName"]))
+    return models
+
+
+def wanted_model(model, wanted):
+    if not wanted:
+        return True
+    simplified = simplify_model_name(model)
+    return any(simplified == item or simplified.startswith(item) or item.startswith(simplified) for item in wanted)
+
+
+def first_number(row, *keys):
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def to_per_million(value):
+    if value is None:
+        return None
+    return round(float(value) * 1_000_000, 8)
+
+
+def extract_litellm_rates(row):
+    rates = {
+        "input": to_per_million(first_number(row, "input_cost_per_token", "inputCostPerToken")),
+        "output": to_per_million(first_number(row, "output_cost_per_token", "outputCostPerToken")),
+        "cacheWrite": to_per_million(first_number(row, "cache_creation_input_token_cost", "cacheCreationInputTokenCost")),
+        "cacheRead": to_per_million(first_number(row, "cache_read_input_token_cost", "cacheReadInputTokenCost")),
+    }
+    long_cache_write = to_per_million(first_number(row, "cache_creation_input_token_cost_above_200k_tokens", "cacheCreationInputTokenCostAbove200kTokens"))
+    long_cache_read = to_per_million(first_number(row, "cache_read_input_token_cost_above_200k_tokens", "cacheReadInputTokenCostAbove200kTokens"))
+    if long_cache_write is not None:
+        rates["cacheWriteAbove200k"] = long_cache_write
+    if long_cache_read is not None:
+        rates["cacheReadAbove200k"] = long_cache_read
+    return {key: value for key, value in rates.items() if value is not None}
+
+
+def fetch_litellm_price_cards(wanted):
+    request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": "ai-usage-explorer"})
+    with urllib.request.urlopen(request, timeout=6) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    cards = {}
+    for model, row in payload.items():
+        if not isinstance(row, dict) or not wanted_model(model, wanted):
+            continue
+        rates = extract_litellm_rates(row)
+        if rates:
+            cards[simplify_model_name(model)] = {
+                "displayName": str(model),
+                "rates": rates,
+                "source": "litellm",
+            }
+    return cards
+
+
+def load_history(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            history = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        history = {}
+    if not isinstance(history.get("snapshots"), list):
+        history["snapshots"] = []
+    history["version"] = 1
+    return history
+
+
+def comparable_models(snapshot):
+    models = snapshot.get("models", {})
+    return json.dumps(models, sort_keys=True, separators=(",", ":"))
+
+
+wanted_models = load_usage_models(USAGE_PATH)
+cards = {
+    model: {"displayName": model, "rates": rates, "source": "builtin"}
+    for model, rates in builtin_price_cards().items()
+    if wanted_model(model, wanted_models)
+}
+source_status = "builtin"
+try:
+    fetched = fetch_litellm_price_cards(wanted_models)
+except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    print(f"Pricing refresh warning: {exc}", file=sys.stderr)
+else:
+    if fetched:
+        cards.update(fetched)
+        source_status = "litellm"
+
+now = datetime.now(timezone.utc).replace(microsecond=0)
+snapshot = {
+    "checkedAt": now.isoformat().replace("+00:00", "Z"),
+    "effectiveDate": date.today().isoformat(),
+    "sourceUrl": SOURCE_URL,
+    "sourceStatus": source_status,
+    "models": dict(sorted(cards.items())),
+}
+
+history = load_history(HISTORY_PATH)
+history["lastCheckedAt"] = snapshot["checkedAt"]
+history["lastSourceStatus"] = source_status
+history["sourceUrl"] = SOURCE_URL
+snapshots = history["snapshots"]
+if snapshots and comparable_models(snapshots[-1]) == comparable_models(snapshot):
+    snapshots[-1]["checkedAt"] = snapshot["checkedAt"]
+    snapshots[-1]["sourceStatus"] = snapshot["sourceStatus"]
+    snapshots[-1]["sourceUrl"] = snapshot["sourceUrl"]
+else:
+    snapshots.append(snapshot)
+
+directory = os.path.dirname(HISTORY_PATH) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp_path = tempfile.mkstemp(prefix=".pricing-history-", suffix=".json", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(history, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(tmp_path, HISTORY_PATH)
+finally:
+    if os.path.exists(tmp_path):
+        os.unlink(tmp_path)
+PY
+}
+
 if [ "$DUMP_JSON" -eq 1 ]; then
     self_update "${ORIGINAL_ARGS[@]}"
     fetch_usage_data
@@ -380,7 +583,9 @@ if [ -z "$DATA_FILE" ]; then
     fetch_usage_data > "$DATA_FILE"
 fi
 
-"$PYTHON_BIN" - "$DATA_FILE" "$GROUP" "$0" "$JSON_FILE" "$SINCE" "$UNTIL" "$PROJECT" "$OFFLINE" <<'PYTHON_EOF'
+refresh_pricing_history "$DATA_FILE"
+
+"$PYTHON_BIN" - "$DATA_FILE" "$GROUP" "$0" "$JSON_FILE" "$SINCE" "$UNTIL" "$PROJECT" "$OFFLINE" "$PRICING_HISTORY_FILE" <<'PYTHON_EOF'
 import json
 import os
 import queue
@@ -474,6 +679,16 @@ def fmt_int(value: float) -> str:
 
 def fmt_cost(value: float) -> str:
     return f"${value:,.2f}"
+
+
+def fmt_rate(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    if value >= 100:
+        return f"${value:,.0f}"
+    if value >= 1:
+        return f"${value:,.2f}"
+    return f"${value:,.4f}"
 
 
 def read_rtk_gain() -> Optional[Dict]:
@@ -609,6 +824,151 @@ def row_provider_names(row: Dict) -> List[str]:
     return ordered_providers(providers)
 
 
+def read_pricing_history(path: str) -> Dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            history = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"snapshots": []}
+    if not isinstance(history.get("snapshots"), list):
+        history["snapshots"] = []
+    history["snapshots"] = sorted(
+        [snapshot for snapshot in history["snapshots"] if isinstance(snapshot, dict)],
+        key=lambda snapshot: str(snapshot.get("effectiveDate") or ""),
+    )
+    return history
+
+
+def simplify_model_name(name: str) -> str:
+    value = str(name or "").strip().lower()
+    for prefix in ("anthropic/", "openai/", "azure/", "bedrock/", "vertex_ai/"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    for suffix in ("-20251001", "-20250929"):
+        value = value.replace(suffix, "")
+    return value.replace("_", "-")
+
+
+def pricing_snapshot_for_date(history: Dict, date_value: str) -> Optional[Dict]:
+    snapshots = history.get("snapshots", [])
+    if not snapshots:
+        return None
+    parsed = parse_row_date(date_value)
+    target = parsed.date().isoformat() if parsed else ""
+    if not target:
+        return snapshots[-1]
+    chosen = None
+    for snapshot in snapshots:
+        effective = str(snapshot.get("effectiveDate") or "")
+        if effective and effective <= target:
+            chosen = snapshot
+    return chosen or snapshots[0]
+
+
+def model_pricing_record(snapshot: Optional[Dict], model: str) -> Optional[Dict]:
+    if not snapshot:
+        return None
+    models = snapshot.get("models", {})
+    if not isinstance(models, dict):
+        return None
+    simplified = simplify_model_name(model)
+    candidates = [
+        simplified,
+        str(model or "").strip().lower(),
+    ]
+    for candidate in candidates:
+        if candidate in models:
+            return models[candidate]
+
+    for key, record in models.items():
+        normalized_key = simplify_model_name(key)
+        if normalized_key == simplified or normalized_key.startswith(simplified) or simplified.startswith(normalized_key):
+            return record
+    return None
+
+
+def rate_value(record: Optional[Dict], key: str) -> Optional[float]:
+    if not record:
+        return None
+    rates = record.get("rates") if isinstance(record.get("rates"), dict) else record
+    value = rates.get(key) if isinstance(rates, dict) else None
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def estimated_model_cost(item: Dict, record: Optional[Dict]) -> Optional[float]:
+    total = 0.0
+    has_usage = False
+    for token_key, rate_key in (
+        ("inputTokens", "input"),
+        ("outputTokens", "output"),
+        ("cacheCreationTokens", "cacheWrite"),
+        ("cacheReadTokens", "cacheRead"),
+    ):
+        try:
+            tokens = int(item.get(token_key, 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if tokens <= 0:
+            continue
+        has_usage = True
+        rate = rate_value(record, rate_key)
+        if rate is None:
+            return None
+        total += tokens * rate / 1_000_000
+    return total if has_usage else None
+
+
+def backfill_missing_costs(data: Dict, history: Dict) -> int:
+    updated = 0
+    daily_changed = False
+    for section in ("daily", "monthly"):
+        rows = data.get(section, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            breakdowns = row.get("modelBreakdowns", [])
+            if not isinstance(breakdowns, list):
+                continue
+            snapshot = pricing_snapshot_for_date(history, row_date(row))
+            row_changed = False
+            for item in breakdowns:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    current_cost = float(item.get("cost", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    current_cost = 0.0
+                if current_cost != 0.0:
+                    continue
+                record = model_pricing_record(snapshot, item.get("modelName", ""))
+                estimated = estimated_model_cost(item, record)
+                if estimated is None or estimated <= 0.0:
+                    continue
+                item["cost"] = estimated
+                row_changed = True
+                updated += 1
+            if row_changed:
+                row["totalCost"] = sum(
+                    float(item.get("cost", 0.0) or 0.0)
+                    for item in breakdowns
+                    if isinstance(item, dict)
+                )
+                daily_changed = daily_changed or section == "daily"
+
+    if daily_changed and isinstance(data.get("totals"), dict):
+        data["totals"]["totalCost"] = sum(
+            float(row.get("totalCost", 0.0) or 0.0)
+            for row in data.get("daily", [])
+            if isinstance(row, dict)
+        )
+    return updated
+
+
 def detail_items(row: Dict) -> List[Dict]:
     items = []
     row_providers = row_provider_names(row)
@@ -662,7 +1022,7 @@ class State:
 
 
 class UsageExplorer:
-    def __init__(self, data: Dict, source_path: str, script_path: str, file_path: str, since: str, until: str, project: str, offline: str):
+    def __init__(self, data: Dict, source_path: str, script_path: str, file_path: str, since: str, until: str, project: str, offline: str, pricing_history_path: str):
         self.console = Console()
         self.source_path = source_path
         self.script_path = script_path
@@ -671,6 +1031,8 @@ class UsageExplorer:
         self.until = until
         self.project = project
         self.offline = offline
+        self.pricing_history_path = pricing_history_path
+        self.pricing_history = read_pricing_history(pricing_history_path)
         self.state = State()
         self.rtk_gain = read_rtk_gain()
         self.load_data(data)
@@ -682,6 +1044,7 @@ class UsageExplorer:
         self._refresh_thread = None
 
     def load_data(self, data: Dict):
+        backfill_missing_costs(data, self.pricing_history)
         self.rows = data.get("daily", [])
         self.totals = data.get("totals", {})
         self.providers = self._providers()
@@ -1036,32 +1399,43 @@ class UsageExplorer:
 
     def render_detail(self, rows: List[Dict]) -> Panel:
         if not rows:
-            return Panel(Text("No rows match the current filter", style="dim"), title="[bold]Detail[/bold]")
+            return Panel(Text("No rows match the current filter", style="dim"), title="[bold]Token Rates[/bold]")
         row = self.model_row_values(rows[self.state.selected], self.selected_models())
+        date_value = row_date(row)
+        snapshot = pricing_snapshot_for_date(self.pricing_history, date_value)
         table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
         table.add_column("Provider")
-        table.add_column("Model")
-        table.add_column("Cost", justify="right")
-        table.add_column("Input", justify="right")
-        table.add_column("Output", justify="right")
-        table.add_column("Cache Create", justify="right")
-        table.add_column("Cache Read", justify="right")
-        items = detail_items(row)
-        if not items:
-            return Panel(Text("No model breakdown available for this row", style="dim"), title=f"[bold]Model Breakdown: {row_date(row)}[/bold]", border_style="magenta")
-        for item in items:
-            cache_create = int(item.get("cacheCreationTokens", 0))
-            cache_read = int(item.get("cacheReadTokens", 0))
+        table.add_column("Model", overflow="ellipsis", no_wrap=True)
+        table.add_column("Input", justify="right", no_wrap=True)
+        table.add_column("Output", justify="right", no_wrap=True)
+        table.add_column("Cache Write", justify="right", no_wrap=True)
+        table.add_column("Cache Read", justify="right", no_wrap=True)
+        models = row_model_names(row)
+        if not models:
+            return Panel(Text("No models available for this row", style="dim"), title=f"[bold]Token Rates: {date_value}[/bold]", border_style="magenta")
+        for model in models:
+            provider = infer_model_provider(model)
+            record = model_pricing_record(snapshot, model)
             table.add_row(
-                compact_providers(item.get("providers", [])),
-                Text(item.get("label", ""), style="white" if item.get("aggregate") else "bright_cyan"),
-                fmt_cost(float(item.get("cost", 0.0))),
-                fmt_int(item.get("inputTokens", 0)),
-                fmt_int(item.get("outputTokens", 0)),
-                fmt_int(cache_create),
-                fmt_int(cache_read),
+                compact_provider(provider) if provider else "Unknown",
+                Text(compact_model(model), style=self.model_colors.get(model, "bright_cyan")),
+                fmt_rate(rate_value(record, "input")),
+                fmt_rate(rate_value(record, "output")),
+                fmt_rate(rate_value(record, "cacheWrite")),
+                fmt_rate(rate_value(record, "cacheRead")),
             )
-        return Panel(table, title=f"[bold]Model Breakdown: {row_date(row)}[/bold]", border_style="magenta")
+        content = [table]
+        if not snapshot:
+            content.append(Text("No pricing history available yet", style="dim"))
+        subtitle = "$/M tokens"
+        if snapshot and snapshot.get("effectiveDate"):
+            subtitle += f" • snapshot {snapshot['effectiveDate']}"
+        return Panel(
+            Group(*content),
+            title=f"[bold]Token Rates: {date_value}[/bold]",
+            subtitle=subtitle,
+            border_style="magenta",
+        )
 
     def render_rtk_gain(self) -> Panel:
         if not self.rtk_gain:
@@ -1378,6 +1752,7 @@ class UsageExplorer:
             updated = True
             self.state.refreshing = False
             if status == "ok":
+                self.pricing_history = read_pricing_history(self.pricing_history_path)
                 self.load_data(payload)
                 self.rtk_gain = read_rtk_gain()
                 self.state.status = "Refreshed " + datetime.now().strftime("%H:%M:%S")
@@ -1465,8 +1840,8 @@ class UsageExplorer:
             days_title += " [bold yellow](focused)[/bold yellow]"
         layout["days"].update(Panel(self.render_days(rows, body_height), title=days_title, border_style="bright_yellow" if self.state.focus == "days" else "cyan"))
         layout["chart"].update(self.render_chart(rows, body_height))
-        layout["detail"].split_row(Layout(name="breakdown", ratio=2), Layout(name="rtk", size=42))
-        layout["breakdown"].update(self.render_detail(rows))
+        layout["detail"].split_row(Layout(name="rates", ratio=2), Layout(name="rtk", size=42))
+        layout["rates"].update(self.render_detail(rows))
         layout["rtk"].update(self.render_rtk_gain())
         layout["help"].update(self.render_help())
         return layout
@@ -1677,6 +2052,7 @@ def main():
         until=sys.argv[6],
         project=sys.argv[7],
         offline=sys.argv[8],
+        pricing_history_path=sys.argv[9],
     ).run()
 
 
