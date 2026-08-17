@@ -55,7 +55,7 @@ The version is stored in `VERSION`. On startup, the script checks the current Gi
 - `tab`: Switch focus between the day list and trend chart.
 - `g` / `G`: Jump to first / last day.
 - `a`: Cycle provider filter (`Claude`, `Codex`, mixed, or all detected providers).
-- `m`: Open the multi-select model filter grouped by detected provider. In the picker, `space` toggles a model, `a` selects all models, `enter` applies, and `esc` cancels.
+- `m`: Open the multi-select model filter grouped by detected provider. In the picker, `space` toggles a model or an entire provider, `a` selects all models, `enter` applies, and `esc` cancels.
 - `esc` / `v`: Open date range filter. Defaults to month to date. Custom ranges use `YYYY-MM-DD..YYYY-MM-DD`.
 - `space` / `enter`: Expand selected row model breakdown.
 - `←/→`: Cycle sort column (prev/next).

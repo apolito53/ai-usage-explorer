@@ -777,6 +777,22 @@ def infer_model_provider(model: str) -> Optional[str]:
     return None
 
 
+def model_menu_marker(selection: Set[str], models: Set[str]) -> str:
+    if models and models.issubset(selection):
+        return "[x]"
+    if models.intersection(selection):
+        return "[-]"
+    return "[ ]"
+
+
+def toggle_model_group(selection: Set[str], models: Set[str]) -> Set[str]:
+    if not models:
+        return selection
+    if models.issubset(selection):
+        return selection - models
+    return selection | models
+
+
 def row_model_names(row: Dict) -> List[str]:
     breakdowns = [
         item.get("modelName")
@@ -992,8 +1008,8 @@ def detail_items(row: Dict) -> List[Dict]:
 class State:
     selected: int = 0
     provider_index: int = 0
-    # Empty means "all models"; the modal below edits a draft so Esc can cancel.
-    selected_models: Set[str] = field(default_factory=set)
+    # None means "all models"; an empty set is a valid filter that shows no models.
+    selected_models: Optional[Set[str]] = None
     model_menu_open: bool = False
     model_menu_index: int = 0
     model_menu_viewport: int = 0
@@ -1051,7 +1067,8 @@ class UsageExplorer:
         self.models = self._models()
         self.model_colors = {m: MODEL_COLORS[i % len(MODEL_COLORS)] for i, m in enumerate(self.models)}
         self.state.provider_index = min(self.state.provider_index, len(self.provider_filter_options()) - 1)
-        self.state.selected_models &= set(self.models)
+        if self.state.selected_models is not None:
+            self.state.selected_models &= set(self.models)
         self.state.selected = 0
         self.state.viewport = 0
         self.state.chart_offset = 0
@@ -1101,14 +1118,19 @@ class UsageExplorer:
             return len(providers) > 1
         return providers == [key]
 
-    def selected_models(self) -> Set[str]:
+    def selected_models(self) -> Optional[Set[str]]:
         # Provider and model filters are independent; filtering applies both at render time.
+        if self.state.selected_models is None:
+            return None
         return self.state.selected_models & set(self.models)
 
     def model_filter_label(self) -> str:
-        models = sorted(self.selected_models())
-        if not models:
+        selected = self.selected_models()
+        if selected is None:
             return "All"
+        models = sorted(selected)
+        if not models:
+            return "None"
         if len(models) == 1:
             return compact_model(models[0])
         return f"{len(models)} selected"
@@ -1148,7 +1170,7 @@ class UsageExplorer:
             row for row in rows
             if self.row_matches_provider_filter(row)
         ]
-        if models:
+        if models is not None:
             rows = [
                 row for row in rows
                 if models.intersection(row_model_names(row))
@@ -1175,8 +1197,8 @@ class UsageExplorer:
 
         return sorted(rows, key=sorter, reverse=self.state.sort_desc)
 
-    def model_row_values(self, row: Dict, models: Set[str]) -> Dict:
-        if not models:
+    def model_row_values(self, row: Dict, models: Optional[Set[str]]) -> Dict:
+        if models is None:
             return row
         matched = [
             item for item in row.get("modelBreakdowns", [])
@@ -1508,15 +1530,21 @@ class UsageExplorer:
             grouped.setdefault(provider, []).append(model)
 
         for provider in ordered_providers(list(grouped.keys())):
-            items.append({"type": "header", "label": compact_provider(provider)})
-            for model in sorted(grouped[provider]):
+            provider_models = sorted(grouped[provider])
+            items.append({
+                "type": "provider",
+                "provider": provider,
+                "models": provider_models,
+                "label": compact_provider(provider),
+            })
+            for model in provider_models:
                 items.append({"type": "model", "model": model, "label": compact_model(model)})
         return items
 
     def model_menu_selectable_indices(self) -> List[int]:
         return [
             idx for idx, item in enumerate(self.model_menu_items())
-            if item.get("type") != "header"
+            if item.get("type") in ("all", "provider", "model")
         ]
 
     def move_model_menu(self, delta: int):
@@ -1553,17 +1581,28 @@ class UsageExplorer:
             item = items[idx]
             selected = idx == self.state.model_menu_index
             row_style = "bold black on bright_white" if selected else ""
-            if item["type"] == "header":
-                table.add_row(Text(""), Text(item["label"], style="bold bright_magenta"))
-                continue
             if item["type"] == "all":
-                marker = "[x]" if self.state.model_menu_selection == all_models else "[ ]"
+                marker = model_menu_marker(self.state.model_menu_selection, all_models)
                 table.add_row(Text(marker), item["label"], style=row_style)
                 continue
-            marker = "[x]" if item["model"] in self.state.model_menu_selection else "[ ]"
-            table.add_row(Text(marker), item["label"], style=row_style)
+            if item["type"] == "provider":
+                marker = model_menu_marker(
+                    self.state.model_menu_selection,
+                    set(item["models"]),
+                )
+                table.add_row(
+                    Text(marker),
+                    Text(item["label"], style="bold bright_magenta"),
+                    style=row_style,
+                )
+                continue
+            marker = model_menu_marker(
+                self.state.model_menu_selection,
+                {item["model"]},
+            )
+            table.add_row(Text(marker), "  " + item["label"], style=row_style)
 
-        subtitle = "space toggle • a select all • enter apply • esc cancel"
+        subtitle = "space toggle model/provider • a select all • enter apply • esc cancel"
         return Panel(
             table,
             title="[bold]Model Filter[/bold]",
@@ -1664,8 +1703,10 @@ class UsageExplorer:
     def open_model_menu(self):
         self.state.model_menu_open = True
         # Work against an explicit draft selection so checked rows always mean included.
-        applied_models = set(self.selected_models())
-        self.state.model_menu_selection = applied_models or set(self.models)
+        applied_models = self.selected_models()
+        self.state.model_menu_selection = (
+            set(self.models) if applied_models is None else set(applied_models)
+        )
         self.state.model_menu_viewport = 0
         items = self.model_menu_items()
         self.state.model_menu_index = 0
@@ -1690,18 +1731,20 @@ class UsageExplorer:
         if item["type"] == "all":
             self.state.model_menu_selection = set(self.models)
             return
-        if item["type"] != "model":
-            return
-        model = item["model"]
-        if model in self.state.model_menu_selection:
-            if len(self.state.model_menu_selection) > 1:
-                self.state.model_menu_selection.remove(model)
+        if item["type"] == "provider":
+            models = set(item["models"])
+        elif item["type"] == "model":
+            models = {item["model"]}
         else:
-            self.state.model_menu_selection.add(model)
+            return
+        self.state.model_menu_selection = toggle_model_group(
+            self.state.model_menu_selection,
+            models,
+        )
 
     def apply_model_menu(self):
         selected = self.state.model_menu_selection & set(self.models)
-        self.state.selected_models = set() if selected == set(self.models) else selected
+        self.state.selected_models = None if selected == set(self.models) else selected
         self.state.selected = 0
         self.state.viewport = 0
         self.state.chart_offset = 0
