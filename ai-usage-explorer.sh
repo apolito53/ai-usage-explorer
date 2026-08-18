@@ -31,6 +31,8 @@ JSON_FILE=""
 OFFLINE=1
 GROUP="day"
 DUMP_JSON=0
+DUMP_CLAUDE_MONTH_JSON=0
+TRAY=0
 NO_UPDATE="${AI_USAGE_EXPLORER_NO_UPDATE:-0}"
 NO_PRICING_UPDATE="${AI_USAGE_EXPLORER_NO_PRICING_UPDATE:-0}"
 
@@ -46,6 +48,7 @@ Options:
   --refresh            Fetch current model pricing instead of ccusage --offline
   --demo               Load bundled demo data instead of running ccusage
   --file PATH          Load an existing ccusage JSON file
+  --tray               Show Claude month-to-date cost in the Ubuntu tray
   --no-update          Skip the startup git update check
   --no-pricing-update  Skip the startup token price check
   --version            Show version and exit
@@ -72,6 +75,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dump-json) DUMP_JSON=1; shift ;;
+        --dump-claude-month-json) DUMP_CLAUDE_MONTH_JSON=1; shift ;;
         --since) SINCE="$2"; shift 2 ;;
         --until) UNTIL="$2"; shift 2 ;;
         --project) PROJECT="$2"; shift 2 ;;
@@ -79,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         --refresh) OFFLINE=0; shift ;;
         --demo) JSON_FILE="${SCRIPT_DIR}/demo/usage-demo.json"; shift ;;
         --file) JSON_FILE="$2"; shift 2 ;;
+        --tray) TRAY=1; shift ;;
         --no-update) NO_UPDATE=1; shift ;;
         --no-pricing-update) NO_PRICING_UPDATE=1; shift ;;
         --version) echo "AI Usage Explorer ${VERSION}"; exit 0 ;;
@@ -366,6 +371,87 @@ PY
     '
 }
 
+fetch_claude_month_data() {
+    AI_USAGE_SINCE="$SINCE" \
+    AI_USAGE_PROJECT="$PROJECT" \
+    AI_USAGE_OFFLINE="$OFFLINE" \
+    bash -lic '
+        if ! command -v nvm >/dev/null 2>&1; then
+            echo "ERROR: nvm is required to run ccusage. Install nvm and Node 22, or load your shell profile before running this script." >&2
+            exit 1
+        fi
+        nvm use 22 >/dev/null
+
+        args=(claude monthly -s "$AI_USAGE_SINCE" --json -b)
+        if [ -n "$AI_USAGE_PROJECT" ]; then
+            args+=(-p "$AI_USAGE_PROJECT")
+        fi
+        if [ "$AI_USAGE_OFFLINE" -eq 1 ]; then
+            args+=(--offline)
+        fi
+
+        # Prefer an already-installed or pnpm-cached ccusage binary. A one-minute
+        # tray poll should not ask the package registry the same question forever.
+        ccusage_bin="$(command -v ccusage 2>/dev/null || true)"
+        if [ -z "$ccusage_bin" ]; then
+            cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/pnpm/dlx"
+            if [ -d "$cache_root" ]; then
+                ccusage_bin="$(
+                    find "$cache_root" -path "*/node_modules/.bin/ccusage" -type f -perm -u+x -printf "%T@ %p\n" 2>/dev/null \
+                        | sort -nr \
+                        | sed -n "1{s/^[^ ]* //;p;}"
+                )"
+            fi
+        fi
+
+        data_file="$(mktemp)"
+        trap "rm -f \"$data_file\"" EXIT
+        if [ -n "$ccusage_bin" ] && "$ccusage_bin" "${args[@]}" > "$data_file"; then
+            cat "$data_file"
+            exit 0
+        fi
+
+        if ! command -v pnpm >/dev/null 2>&1; then
+            if command -v corepack >/dev/null 2>&1; then
+                corepack enable pnpm >/dev/null 2>&1 || true
+            fi
+        fi
+        if ! command -v pnpm >/dev/null 2>&1; then
+            echo "ERROR: pnpm is required to run ccusage via pnpm dlx. Install pnpm or enable corepack for Node 22." >&2
+            exit 1
+        fi
+        pnpm dlx ccusage "${args[@]}" > "$data_file"
+        cat "$data_file"
+    '
+}
+
+run_tray() {
+    local tray_python tray_args
+    if [ -x /usr/bin/python3 ]; then
+        tray_python=/usr/bin/python3
+    elif command -v python3 >/dev/null 2>&1; then
+        tray_python="$(command -v python3)"
+    else
+        echo "ERROR: python3 is required for the Ubuntu tray indicator." >&2
+        exit 1
+    fi
+
+    tray_args=(
+        --script "${SCRIPT_DIR}/ai-usage-explorer.sh"
+        --pricing-history "$PRICING_HISTORY_FILE"
+    )
+    if [ -n "$PROJECT" ]; then
+        tray_args+=(--project "$PROJECT")
+    fi
+    if [ "$OFFLINE" -eq 0 ]; then
+        tray_args+=(--online)
+    fi
+    if [ "$NO_PRICING_UPDATE" -eq 1 ]; then
+        tray_args+=(--no-pricing-update)
+    fi
+    exec "$tray_python" "${SCRIPT_DIR}/ai-usage-tray.py" "${tray_args[@]}"
+}
+
 refresh_pricing_history() {
     if [ "$NO_PRICING_UPDATE" = "1" ]; then
         return
@@ -565,6 +651,16 @@ finally:
 PY
 }
 
+if [ "$DUMP_CLAUDE_MONTH_JSON" -eq 1 ]; then
+    self_update "${ORIGINAL_ARGS[@]}"
+    CLAUDE_MONTH_FILE="$(mktemp)"
+    trap 'rm -f "$CLAUDE_MONTH_FILE"' EXIT
+    fetch_claude_month_data > "$CLAUDE_MONTH_FILE"
+    refresh_pricing_history "$CLAUDE_MONTH_FILE"
+    cat "$CLAUDE_MONTH_FILE"
+    exit 0
+fi
+
 if [ "$DUMP_JSON" -eq 1 ]; then
     self_update "${ORIGINAL_ARGS[@]}"
     fetch_usage_data
@@ -572,6 +668,9 @@ if [ "$DUMP_JSON" -eq 1 ]; then
 fi
 
 self_update "${ORIGINAL_ARGS[@]}"
+if [ "$TRAY" -eq 1 ]; then
+    run_tray
+fi
 ensure_python_dependencies
 
 DATA_FILE="$JSON_FILE"

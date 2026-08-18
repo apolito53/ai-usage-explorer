@@ -18,6 +18,22 @@ On startup, the script checks for required Python packages. If they are missing,
 
 `ccusage` does not need to be installed globally. The data fetch path runs `pnpm dlx ccusage`, so `pnpm` downloads or reuses `ccusage` on demand. The script expects `nvm`, Node 22, and `pnpm` to be available in the login shell used for fetching.
 
+## Ubuntu Tray Indicator
+
+```bash
+./ai-usage-explorer.sh --tray
+```
+
+The indicator shows Claude's current calendar-month cost next to a monochrome usage icon and refreshes once per minute. Its menu can refresh immediately, open the full terminal explorer, or quit. The first poll also refreshes the cached model price cards; later polls reuse them so the tray does not hit pricing sources every minute.
+
+The tray uses Ubuntu's AppIndicator support and the system Python GTK bindings. On current Ubuntu releases, install them with:
+
+```bash
+sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
+```
+
+Older Ubuntu releases may provide `gir1.2-appindicator3-0.1` instead; the launcher supports either package. Set `AI_USAGE_EXPLORER_TRAY_REFRESH_SECONDS` to change the 60-second interval (minimum 10 seconds).
+
 ## Versioning and Updates
 
 ```bash
@@ -34,6 +50,7 @@ The version is stored in `VERSION`. On startup, the script checks the current Gi
 ./ai-usage-explorer.sh --refresh
 ./ai-usage-explorer.sh --demo
 ./ai-usage-explorer.sh --file /tmp/ccusage-daily.json
+./ai-usage-explorer.sh --tray
 ./ai-usage-explorer.sh --version
 ```
 
@@ -44,6 +61,7 @@ The version is stored in `VERSION`. On startup, the script checks the current Gi
 - `--refresh`: Fetch current model pricing instead of using `ccusage --offline`.
 - `--demo`: Load bundled demo data instead of running `ccusage`.
 - `--file PATH`: Load an existing `ccusage` JSON file.
+- `--tray`: Show Claude's current month-to-date cost in the Ubuntu tray.
 - `--no-update`: Skip the startup Git update check.
 - `--no-pricing-update`: Skip the startup token price check.
 - `--version`: Show the current explorer version.
