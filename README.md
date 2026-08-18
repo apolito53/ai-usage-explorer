@@ -34,6 +34,14 @@ sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
 
 Older Ubuntu releases may provide `gir1.2-appindicator3-0.1` instead; the launcher supports either package. Set `AI_USAGE_EXPLORER_TRAY_REFRESH_SECONDS` to change the 60-second interval (minimum 10 seconds).
 
+To launch the tray automatically after signing in to Ubuntu:
+
+```bash
+./ai-usage-explorer.sh --install-tray-autostart
+```
+
+This installs `ai-usage-explorer-tray.desktop` in the current user's XDG autostart directory. It points at the current checkout, so moving or deleting the checkout requires reinstalling the entry. Remove it with `./ai-usage-explorer.sh --remove-tray-autostart`.
+
 ## Versioning and Updates
 
 ```bash
@@ -62,6 +70,8 @@ The version is stored in `VERSION`. On startup, the script checks the current Gi
 - `--demo`: Load bundled demo data instead of running `ccusage`.
 - `--file PATH`: Load an existing `ccusage` JSON file.
 - `--tray`: Show Claude's current month-to-date cost in the Ubuntu tray.
+- `--install-tray-autostart`: Launch the tray automatically after Ubuntu login.
+- `--remove-tray-autostart`: Remove the Ubuntu login startup entry.
 - `--no-update`: Skip the startup Git update check.
 - `--no-pricing-update`: Skip the startup token price check.
 - `--version`: Show the current explorer version.

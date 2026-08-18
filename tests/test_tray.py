@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import stat
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,9 @@ SPEC.loader.exec_module(TRAY)
 
 
 class TraySummaryTests(unittest.TestCase):
+    def test_configured_symbolic_icon_exists(self):
+        self.assertTrue((ROOT / "assets" / f"{TRAY.ICON_NAME}.svg").is_file())
+
     def test_default_poll_interval_is_one_minute(self):
         self.assertEqual(60, TRAY.DEFAULT_REFRESH_SECONDS)
 
@@ -100,6 +105,7 @@ class TraySummaryTests(unittest.TestCase):
             online=False,
             refresh_pricing=True,
             refresh_seconds=60,
+            autostart_action=None,
         )
         now = datetime(2026, 8, 18, 12, 0)
 
@@ -109,6 +115,36 @@ class TraySummaryTests(unittest.TestCase):
         self.assertIn("20260801", first)
         self.assertNotIn("--no-pricing-update", first)
         self.assertIn("--no-pricing-update", later)
+
+    def test_autostart_entry_quotes_the_checkout_path(self):
+        entry = TRAY.desktop_entry(Path("/tmp/AI Usage/ai-usage-explorer.sh"))
+
+        self.assertIn(
+            'Exec="/tmp/AI Usage/ai-usage-explorer.sh" --tray --no-update',
+            entry,
+        )
+        self.assertIn("X-GNOME-Autostart-enabled=true", entry)
+        self.assertIn("Terminal=false", entry)
+
+    def test_autostart_install_and_remove_are_scoped_to_one_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir)
+            target = TRAY.install_autostart(
+                ROOT / "ai-usage-explorer.sh",
+                config_home=config_home,
+            )
+
+            self.assertEqual(
+                config_home / "autostart" / TRAY.AUTOSTART_FILENAME,
+                target,
+            )
+            self.assertTrue(target.is_file())
+            self.assertEqual(0o644, stat.S_IMODE(target.stat().st_mode))
+
+            removed_target, removed = TRAY.remove_autostart(config_home)
+            self.assertEqual(target, removed_target)
+            self.assertTrue(removed)
+            self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

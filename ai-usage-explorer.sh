@@ -33,6 +33,8 @@ GROUP="day"
 DUMP_JSON=0
 DUMP_CLAUDE_MONTH_JSON=0
 TRAY=0
+INSTALL_TRAY_AUTOSTART=0
+REMOVE_TRAY_AUTOSTART=0
 NO_UPDATE="${AI_USAGE_EXPLORER_NO_UPDATE:-0}"
 NO_PRICING_UPDATE="${AI_USAGE_EXPLORER_NO_PRICING_UPDATE:-0}"
 
@@ -49,6 +51,10 @@ Options:
   --demo               Load bundled demo data instead of running ccusage
   --file PATH          Load an existing ccusage JSON file
   --tray               Show Claude month-to-date cost in the Ubuntu tray
+  --install-tray-autostart
+                       Launch the tray automatically after Ubuntu login
+  --remove-tray-autostart
+                       Remove the Ubuntu login startup entry
   --no-update          Skip the startup git update check
   --no-pricing-update  Skip the startup token price check
   --version            Show version and exit
@@ -84,6 +90,8 @@ while [[ $# -gt 0 ]]; do
         --demo) JSON_FILE="${SCRIPT_DIR}/demo/usage-demo.json"; shift ;;
         --file) JSON_FILE="$2"; shift 2 ;;
         --tray) TRAY=1; shift ;;
+        --install-tray-autostart) INSTALL_TRAY_AUTOSTART=1; shift ;;
+        --remove-tray-autostart) REMOVE_TRAY_AUTOSTART=1; shift ;;
         --no-update) NO_UPDATE=1; shift ;;
         --no-pricing-update) NO_PRICING_UPDATE=1; shift ;;
         --version) echo "AI Usage Explorer ${VERSION}"; exit 0 ;;
@@ -425,16 +433,20 @@ fetch_claude_month_data() {
     '
 }
 
-run_tray() {
-    local tray_python tray_args
+find_tray_python() {
     if [ -x /usr/bin/python3 ]; then
-        tray_python=/usr/bin/python3
+        printf '%s\n' /usr/bin/python3
     elif command -v python3 >/dev/null 2>&1; then
-        tray_python="$(command -v python3)"
+        command -v python3
     else
         echo "ERROR: python3 is required for the Ubuntu tray indicator." >&2
         exit 1
     fi
+}
+
+run_tray() {
+    local tray_python tray_args
+    tray_python="$(find_tray_python)"
 
     tray_args=(
         --script "${SCRIPT_DIR}/ai-usage-explorer.sh"
@@ -450,6 +462,15 @@ run_tray() {
         tray_args+=(--no-pricing-update)
     fi
     exec "$tray_python" "${SCRIPT_DIR}/ai-usage-tray.py" "${tray_args[@]}"
+}
+
+manage_tray_autostart() {
+    local action="$1" tray_python
+    tray_python="$(find_tray_python)"
+    "$tray_python" "${SCRIPT_DIR}/ai-usage-tray.py" \
+        --script "${SCRIPT_DIR}/ai-usage-explorer.sh" \
+        --pricing-history "$PRICING_HISTORY_FILE" \
+        "--${action}-autostart"
 }
 
 refresh_pricing_history() {
@@ -650,6 +671,16 @@ finally:
         os.unlink(tmp_path)
 PY
 }
+
+if [ "$INSTALL_TRAY_AUTOSTART" -eq 1 ]; then
+    manage_tray_autostart install
+    exit 0
+fi
+
+if [ "$REMOVE_TRAY_AUTOSTART" -eq 1 ]; then
+    manage_tray_autostart remove
+    exit 0
+fi
 
 if [ "$DUMP_CLAUDE_MONTH_JSON" -eq 1 ]; then
     self_update "${ORIGINAL_ARGS[@]}"

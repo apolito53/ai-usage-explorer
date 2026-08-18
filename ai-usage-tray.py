@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,9 +19,10 @@ from typing import Dict, Optional, Tuple
 
 
 APP_ID = "ai-usage-explorer"
-ICON_NAME = "ai-usage-explorer-symbolic"
+ICON_NAME = "ai-usage-claude-symbolic"
 DEFAULT_REFRESH_SECONDS = 60
 FETCH_TIMEOUT_SECONDS = 45
+AUTOSTART_FILENAME = "ai-usage-explorer-tray.desktop"
 
 
 def safe_float(value: object) -> float:
@@ -207,6 +209,72 @@ class TrayConfig:
     online: bool
     refresh_pricing: bool
     refresh_seconds: int
+    autostart_action: Optional[str]
+
+
+def desktop_exec_arg(value: str) -> str:
+    escaped = value.replace("\\", "\\\\")
+    for character in ('"', "`", "$"):
+        escaped = escaped.replace(character, "\\" + character)
+    return f'"{escaped}"'
+
+
+def desktop_entry(script_path: Path) -> str:
+    command = f"{desktop_exec_arg(str(script_path))} --tray --no-update"
+    return "\n".join(
+        (
+            "[Desktop Entry]",
+            "Type=Application",
+            "Version=1.0",
+            "Name=AI Usage Explorer Tray",
+            "Comment=Show Claude month-to-date usage in the Ubuntu panel",
+            f"Exec={command}",
+            "Terminal=false",
+            "StartupNotify=false",
+            "X-GNOME-Autostart-enabled=true",
+            "X-GNOME-Autostart-Delay=3",
+            "",
+        )
+    )
+
+
+def autostart_path(config_home: Optional[Path] = None) -> Path:
+    if config_home is None:
+        configured = os.environ.get("XDG_CONFIG_HOME")
+        config_home = Path(configured).expanduser() if configured else Path.home() / ".config"
+    return config_home / "autostart" / AUTOSTART_FILENAME
+
+
+def install_autostart(script_path: Path, config_home: Optional[Path] = None) -> Path:
+    target = autostart_path(config_home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".ai-usage-explorer-tray-",
+            suffix=".desktop",
+            dir=str(target.parent),
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(desktop_entry(script_path))
+        temp_path.chmod(0o644)
+        os.replace(str(temp_path), str(target))
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+    return target
+
+
+def remove_autostart(config_home: Optional[Path] = None) -> Tuple[Path, bool]:
+    target = autostart_path(config_home)
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return target, False
+    return target, True
 
 
 def fetch_command(config: TrayConfig, refresh_pricing: bool, now: datetime) -> list:
@@ -434,6 +502,19 @@ def parse_args(argv=None) -> TrayConfig:
     parser.add_argument("--project", default="")
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--no-pricing-update", action="store_false", dest="refresh_pricing")
+    autostart = parser.add_mutually_exclusive_group()
+    autostart.add_argument(
+        "--install-autostart",
+        action="store_const",
+        const="install",
+        dest="autostart_action",
+    )
+    autostart.add_argument(
+        "--remove-autostart",
+        action="store_const",
+        const="remove",
+        dest="autostart_action",
+    )
     parser.add_argument(
         "--refresh-seconds",
         type=int,
@@ -454,11 +535,23 @@ def parse_args(argv=None) -> TrayConfig:
         online=args.online,
         refresh_pricing=args.refresh_pricing,
         refresh_seconds=args.refresh_seconds,
+        autostart_action=args.autostart_action,
     )
 
 
 def main(argv=None) -> int:
     config = parse_args(argv)
+    if config.autostart_action == "install":
+        target = install_autostart(config.script_path)
+        print(f"Installed Ubuntu startup entry: {target}")
+        return 0
+    if config.autostart_action == "remove":
+        target, removed = remove_autostart()
+        if removed:
+            print(f"Removed Ubuntu startup entry: {target}")
+        else:
+            print(f"Ubuntu startup entry was not installed: {target}")
+        return 0
     try:
         gtk, glib, app_indicator = load_gtk()
     except RuntimeError as exc:
