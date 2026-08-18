@@ -26,6 +26,9 @@ class TraySummaryTests(unittest.TestCase):
     def test_default_poll_interval_is_one_minute(self):
         self.assertEqual(60, TRAY.DEFAULT_REFRESH_SECONDS)
 
+    def test_default_panel_period_is_month_to_date(self):
+        self.assertEqual("month", TRAY.DEFAULT_DISPLAY_PERIOD)
+
     def test_current_month_uses_only_matching_monthly_rows(self):
         usage = {
             "monthly": [
@@ -52,6 +55,25 @@ class TraySummaryTests(unittest.TestCase):
             3.75,
             TRAY.claude_month_cost(usage, datetime(2026, 8, 18, 12, 0)),
         )
+
+    def test_today_uses_only_rows_matching_current_date(self):
+        usage = {
+            "daily": [
+                {"date": "2026-08-17", "totalCost": 1.25},
+                {"date": "2026-08-18", "totalCost": 2.5},
+                {"date": "20260818", "totalCost": 0.75},
+                {"date": "2026-07-18", "totalCost": 100.0},
+            ]
+        }
+
+        self.assertAlmostEqual(
+            3.25,
+            TRAY.claude_today_cost(usage, datetime(2026, 8, 18, 12, 0)),
+        )
+
+    def test_panel_period_selects_the_corresponding_total(self):
+        self.assertEqual(12.0, TRAY.display_period_cost("month", 12.0, 3.0))
+        self.assertEqual(3.0, TRAY.display_period_cost("today", 12.0, 3.0))
 
     def test_zero_cost_model_is_backfilled_before_totaling(self):
         usage = {
@@ -112,6 +134,7 @@ class TraySummaryTests(unittest.TestCase):
         first = TRAY.fetch_command(config, refresh_pricing=True, now=now)
         later = TRAY.fetch_command(config, refresh_pricing=False, now=now)
 
+        self.assertIn("--dump-claude-tray-json", first)
         self.assertIn("20260801", first)
         self.assertNotIn("--no-pricing-update", first)
         self.assertIn("--no-pricing-update", later)
@@ -132,6 +155,8 @@ class TraySummaryTests(unittest.TestCase):
             target = TRAY.install_autostart(
                 ROOT / "ai-usage-explorer.sh",
                 config_home=config_home,
+                platform_name="linux",
+                os_release={"ID": "ubuntu"},
             )
 
             self.assertEqual(
@@ -145,6 +170,45 @@ class TraySummaryTests(unittest.TestCase):
             self.assertEqual(target, removed_target)
             self.assertTrue(removed)
             self.assertFalse(target.exists())
+
+    def test_autostart_accepts_ubuntu_derived_linux(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = TRAY.install_autostart(
+                ROOT / "ai-usage-explorer.sh",
+                config_home=Path(temp_dir),
+                platform_name="linux",
+                os_release={"ID": "pop", "ID_LIKE": "ubuntu debian"},
+            )
+
+            self.assertTrue(target.is_file())
+
+    def test_autostart_rejects_non_linux_without_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir)
+
+            with self.assertRaisesRegex(RuntimeError, "detected darwin"):
+                TRAY.install_autostart(
+                    ROOT / "ai-usage-explorer.sh",
+                    config_home=config_home,
+                    platform_name="darwin",
+                    os_release={},
+                )
+
+            self.assertFalse(TRAY.autostart_path(config_home).exists())
+
+    def test_autostart_rejects_non_ubuntu_linux_without_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir)
+
+            with self.assertRaisesRegex(RuntimeError, "detected Fedora Linux"):
+                TRAY.install_autostart(
+                    ROOT / "ai-usage-explorer.sh",
+                    config_home=config_home,
+                    platform_name="linux",
+                    os_release={"ID": "fedora", "PRETTY_NAME": "Fedora Linux"},
+                )
+
+            self.assertFalse(TRAY.autostart_path(config_home).exists())
 
 
 if __name__ == "__main__":

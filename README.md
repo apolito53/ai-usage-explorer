@@ -24,7 +24,7 @@ On startup, the script checks for required Python packages. If they are missing,
 ./ai-usage-explorer.sh --tray
 ```
 
-The indicator shows Claude's current calendar-month cost next to a monochrome usage icon and refreshes once per minute. Its menu can refresh immediately, open the full terminal explorer, or quit. The first poll also refreshes the cached model price cards; later polls reuse them so the tray does not hit pricing sources every minute.
+The indicator shows Claude's current calendar-month cost next to a monochrome usage icon and refreshes once per minute. Its menu always displays both month-to-date and today's cost, and lets you choose which one appears in the panel; month-to-date is selected by default. The menu can also refresh immediately, open the full terminal explorer, or quit. The first poll refreshes the cached model price cards; later polls reuse them so the tray does not hit pricing sources every minute.
 
 The tray uses Ubuntu's AppIndicator support and the system Python GTK bindings. On current Ubuntu releases, install them with:
 
@@ -40,7 +40,7 @@ To launch the tray automatically after signing in to Ubuntu:
 ./ai-usage-explorer.sh --install-tray-autostart
 ```
 
-This installs `ai-usage-explorer-tray.desktop` in the current user's XDG autostart directory. It points at the current checkout, so moving or deleting the checkout requires reinstalling the entry. Remove it with `./ai-usage-explorer.sh --remove-tray-autostart`.
+This first verifies that the host is Ubuntu or an Ubuntu-derived Linux distribution, then installs `ai-usage-explorer-tray.desktop` in the current user's XDG autostart directory. Unsupported operating systems are rejected without writing a startup file. The entry points at the current checkout, so moving or deleting the checkout requires reinstalling it. Remove it with `./ai-usage-explorer.sh --remove-tray-autostart`.
 
 ## Versioning and Updates
 
@@ -69,7 +69,7 @@ The version is stored in `VERSION`. On startup, the script checks the current Gi
 - `--refresh`: Fetch current model pricing instead of using `ccusage --offline`.
 - `--demo`: Load bundled demo data instead of running `ccusage`.
 - `--file PATH`: Load an existing `ccusage` JSON file.
-- `--tray`: Show Claude's current month-to-date cost in the Ubuntu tray.
+- `--tray`: Show Claude usage in the Ubuntu tray, selectable between month-to-date and today.
 - `--install-tray-autostart`: Launch the tray automatically after Ubuntu login.
 - `--remove-tray-autostart`: Remove the Ubuntu login startup entry.
 - `--no-update`: Skip the startup Git update check.

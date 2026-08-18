@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ubuntu AppIndicator showing Claude's current-month usage cost."""
+"""Ubuntu AppIndicator showing Claude's current usage cost."""
 
 from __future__ import annotations
 
@@ -21,8 +21,10 @@ from typing import Dict, Optional, Tuple
 APP_ID = "ai-usage-explorer"
 ICON_NAME = "ai-usage-claude-symbolic"
 DEFAULT_REFRESH_SECONDS = 60
+DEFAULT_DISPLAY_PERIOD = "month"
 FETCH_TIMEOUT_SECONDS = 45
 AUTOSTART_FILENAME = "ai-usage-explorer-tray.desktop"
+OS_RELEASE_PATH = Path("/etc/os-release")
 
 
 def safe_float(value: object) -> float:
@@ -197,6 +199,25 @@ def claude_month_cost(data: Dict, now: Optional[datetime] = None) -> float:
     )
 
 
+def claude_today_cost(data: Dict, now: Optional[datetime] = None) -> float:
+    """Return the Claude cost for the calendar day containing ``now``."""
+    current_date = (now or datetime.now()).date()
+    daily_rows = data.get("daily", [])
+    if not isinstance(daily_rows, list):
+        return 0.0
+    return sum(
+        safe_float(row.get("totalCost"))
+        for row in daily_rows
+        if isinstance(row, dict)
+        and (parsed := parse_row_date(row_date(row))) is not None
+        and parsed.date() == current_date
+    )
+
+
+def display_period_cost(period: str, month_cost: float, today_cost: float) -> float:
+    return today_cost if period == "today" else month_cost
+
+
 def format_cost(value: float) -> str:
     return f"${value:,.2f}"
 
@@ -245,7 +266,53 @@ def autostart_path(config_home: Optional[Path] = None) -> Path:
     return config_home / "autostart" / AUTOSTART_FILENAME
 
 
-def install_autostart(script_path: Path, config_home: Optional[Path] = None) -> Path:
+def read_os_release(path: Path = OS_RELEASE_PATH) -> Dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    release = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        release[key] = value
+    return release
+
+
+def require_ubuntu_autostart(
+    platform_name: Optional[str] = None,
+    os_release: Optional[Dict[str, str]] = None,
+) -> None:
+    detected_platform = platform_name if platform_name is not None else sys.platform
+    if not detected_platform.startswith("linux"):
+        raise RuntimeError(
+            "tray autostart is supported only on Ubuntu or Ubuntu-derived Linux "
+            f"(detected {detected_platform})"
+        )
+
+    release = os_release if os_release is not None else read_os_release()
+    ubuntu_family = {str(release.get("ID", "")).lower()}
+    ubuntu_family.update(str(release.get("ID_LIKE", "")).lower().split())
+    if "ubuntu" not in ubuntu_family:
+        detected_os = release.get("PRETTY_NAME") or release.get("ID") or "unknown Linux"
+        raise RuntimeError(
+            "tray autostart is supported only on Ubuntu or Ubuntu-derived Linux "
+            f"(detected {detected_os})"
+        )
+
+
+def install_autostart(
+    script_path: Path,
+    config_home: Optional[Path] = None,
+    platform_name: Optional[str] = None,
+    os_release: Optional[Dict[str, str]] = None,
+) -> Path:
+    require_ubuntu_autostart(platform_name, os_release)
     target = autostart_path(config_home)
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_path = None
@@ -280,7 +347,7 @@ def remove_autostart(config_home: Optional[Path] = None) -> Tuple[Path, bool]:
 def fetch_command(config: TrayConfig, refresh_pricing: bool, now: datetime) -> list:
     command = [
         str(config.script_path),
-        "--dump-claude-month-json",
+        "--dump-claude-tray-json",
         "--no-update",
         "--since",
         now.strftime("%Y%m01"),
@@ -294,7 +361,7 @@ def fetch_command(config: TrayConfig, refresh_pricing: bool, now: datetime) -> l
     return command
 
 
-def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, datetime]:
+def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, float, datetime]:
     now = datetime.now()
     result = subprocess.run(
         fetch_command(config, refresh_pricing, now),
@@ -319,7 +386,7 @@ def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, datet
     except json.JSONDecodeError as exc:
         raise RuntimeError("ccusage returned invalid JSON") from exc
     backfill_missing_costs(data, read_pricing_history(config.pricing_history_path))
-    return claude_month_cost(data, now), now
+    return claude_month_cost(data, now), claude_today_cost(data, now), now
 
 
 def load_gtk():
@@ -357,6 +424,9 @@ class ClaudeUsageTray:
         self.AppIndicator = app_indicator
         self.refreshing = False
         self.has_refreshed_pricing = not config.refresh_pricing
+        self.display_period = DEFAULT_DISPLAY_PERIOD
+        self.month_cost: Optional[float] = None
+        self.today_cost: Optional[float] = None
 
         icon_dir = Path(__file__).resolve().parent / "assets"
         self.indicator = app_indicator.Indicator.new(
@@ -366,7 +436,7 @@ class ClaudeUsageTray:
         )
         self.indicator.set_icon_theme_path(str(icon_dir))
         self.indicator.set_status(app_indicator.IndicatorStatus.ACTIVE)
-        self.indicator.set_title("Claude month-to-date usage")
+        self.indicator.set_title("Claude usage")
         self.indicator.set_label("…", "$9,999.99")
         self.indicator.set_menu(self._build_menu())
 
@@ -380,16 +450,34 @@ class ClaudeUsageTray:
         self.month_item = self._disabled_item(
             "Claude · " + datetime.now().strftime("%B %Y")
         )
-        self.total_item = self._disabled_item("Month to date: …")
+        self.month_total_item = self._disabled_item("Month to date: …")
+        self.today_total_item = self._disabled_item("Today: …")
         self.updated_item = self._disabled_item("Not refreshed yet")
         self.status_item = self._disabled_item("")
         for item in (
             self.month_item,
-            self.total_item,
+            self.month_total_item,
+            self.today_total_item,
             self.updated_item,
             self.status_item,
         ):
             menu.append(item)
+        menu.append(self.Gtk.SeparatorMenuItem())
+
+        menu.append(self._disabled_item("Show in panel"))
+        self.month_radio = self.Gtk.RadioMenuItem.new_with_label(
+            None,
+            "Month to date",
+        )
+        self.today_radio = self.Gtk.RadioMenuItem.new_with_label_from_widget(
+            self.month_radio,
+            "Today",
+        )
+        self.month_radio.set_active(True)
+        self.month_radio.connect("toggled", self._select_display_period, "month")
+        self.today_radio.connect("toggled", self._select_display_period, "today")
+        menu.append(self.month_radio)
+        menu.append(self.today_radio)
         menu.append(self.Gtk.SeparatorMenuItem())
 
         self.refresh_item = self.Gtk.MenuItem(label="Refresh now")
@@ -414,6 +502,25 @@ class ClaudeUsageTray:
             self.status_item.show()
         else:
             self.status_item.hide()
+
+    def _select_display_period(self, item, period: str):
+        if not item.get_active():
+            return
+        self.display_period = period
+        self._update_panel_label()
+
+    def _update_panel_label(self):
+        if self.month_cost is None or self.today_cost is None:
+            formatted = "…"
+        else:
+            formatted = format_cost(
+                display_period_cost(
+                    self.display_period,
+                    self.month_cost,
+                    self.today_cost,
+                )
+            )
+        self.indicator.set_label(formatted, "$9,999.99")
 
     def start(self):
         self.refresh()
@@ -446,12 +553,21 @@ class ClaudeUsageTray:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_success(self, cost: float, refreshed_at: datetime):
-        formatted = format_cost(cost)
+    def _finish_success(
+        self,
+        month_cost: float,
+        today_cost: float,
+        refreshed_at: datetime,
+    ):
         self.has_refreshed_pricing = True
-        self.indicator.set_label(formatted, "$9,999.99")
+        self.month_cost = month_cost
+        self.today_cost = today_cost
+        self._update_panel_label()
         self.month_item.set_label("Claude · " + refreshed_at.strftime("%B %Y"))
-        self.total_item.set_label(f"Month to date: {formatted}")
+        self.month_total_item.set_label(
+            f"Month to date: {format_cost(month_cost)}"
+        )
+        self.today_total_item.set_label(f"Today: {format_cost(today_cost)}")
         self.updated_item.set_label("Updated " + refreshed_at.strftime("%-I:%M %p"))
         self._set_status("")
         self._finish_refresh()
@@ -542,7 +658,11 @@ def parse_args(argv=None) -> TrayConfig:
 def main(argv=None) -> int:
     config = parse_args(argv)
     if config.autostart_action == "install":
-        target = install_autostart(config.script_path)
+        try:
+            target = install_autostart(config.script_path)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
         print(f"Installed Ubuntu startup entry: {target}")
         return 0
     if config.autostart_action == "remove":

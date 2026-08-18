@@ -31,7 +31,7 @@ JSON_FILE=""
 OFFLINE=1
 GROUP="day"
 DUMP_JSON=0
-DUMP_CLAUDE_MONTH_JSON=0
+DUMP_CLAUDE_TRAY_JSON=0
 TRAY=0
 INSTALL_TRAY_AUTOSTART=0
 REMOVE_TRAY_AUTOSTART=0
@@ -50,7 +50,7 @@ Options:
   --refresh            Fetch current model pricing instead of ccusage --offline
   --demo               Load bundled demo data instead of running ccusage
   --file PATH          Load an existing ccusage JSON file
-  --tray               Show Claude month-to-date cost in the Ubuntu tray
+  --tray               Show selectable Claude usage in the Ubuntu tray
   --install-tray-autostart
                        Launch the tray automatically after Ubuntu login
   --remove-tray-autostart
@@ -81,7 +81,10 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dump-json) DUMP_JSON=1; shift ;;
-        --dump-claude-month-json) DUMP_CLAUDE_MONTH_JSON=1; shift ;;
+        --dump-claude-month-json|--dump-claude-tray-json)
+            DUMP_CLAUDE_TRAY_JSON=1
+            shift
+            ;;
         --since) SINCE="$2"; shift 2 ;;
         --until) UNTIL="$2"; shift 2 ;;
         --project) PROJECT="$2"; shift 2 ;;
@@ -379,7 +382,7 @@ PY
     '
 }
 
-fetch_claude_month_data() {
+fetch_claude_tray_data() {
     AI_USAGE_SINCE="$SINCE" \
     AI_USAGE_PROJECT="$PROJECT" \
     AI_USAGE_OFFLINE="$OFFLINE" \
@@ -389,14 +392,6 @@ fetch_claude_month_data() {
             exit 1
         fi
         nvm use 22 >/dev/null
-
-        args=(claude monthly -s "$AI_USAGE_SINCE" --json -b)
-        if [ -n "$AI_USAGE_PROJECT" ]; then
-            args+=(-p "$AI_USAGE_PROJECT")
-        fi
-        if [ "$AI_USAGE_OFFLINE" -eq 1 ]; then
-            args+=(--offline)
-        fi
 
         # Prefer an already-installed or pnpm-cached ccusage binary. A one-minute
         # tray poll should not ask the package registry the same question forever.
@@ -412,24 +407,63 @@ fetch_claude_month_data() {
             fi
         fi
 
-        data_file="$(mktemp)"
-        trap "rm -f \"$data_file\"" EXIT
-        if [ -n "$ccusage_bin" ] && "$ccusage_bin" "${args[@]}" > "$data_file"; then
-            cat "$data_file"
-            exit 0
-        fi
-
-        if ! command -v pnpm >/dev/null 2>&1; then
-            if command -v corepack >/dev/null 2>&1; then
-                corepack enable pnpm >/dev/null 2>&1 || true
+        ensure_pnpm() {
+            if ! command -v pnpm >/dev/null 2>&1; then
+                if command -v corepack >/dev/null 2>&1; then
+                    corepack enable pnpm >/dev/null 2>&1 || true
+                fi
             fi
-        fi
-        if ! command -v pnpm >/dev/null 2>&1; then
-            echo "ERROR: pnpm is required to run ccusage via pnpm dlx. Install pnpm or enable corepack for Node 22." >&2
-            exit 1
-        fi
-        pnpm dlx ccusage "${args[@]}" > "$data_file"
-        cat "$data_file"
+            if ! command -v pnpm >/dev/null 2>&1; then
+                echo "ERROR: pnpm is required to run ccusage via pnpm dlx. Install pnpm or enable corepack for Node 22." >&2
+                exit 1
+            fi
+        }
+
+        run_ccusage() {
+            period="$1"
+            output_file="$2"
+            args=(claude "$period" -s "$AI_USAGE_SINCE" --json -b)
+            if [ -n "$AI_USAGE_PROJECT" ]; then
+                args+=(-p "$AI_USAGE_PROJECT")
+            fi
+            if [ "$AI_USAGE_OFFLINE" -eq 1 ]; then
+                args+=(--offline)
+            fi
+            if [ -n "$ccusage_bin" ] && "$ccusage_bin" "${args[@]}" > "$output_file"; then
+                return
+            fi
+            ensure_pnpm
+            pnpm dlx ccusage "${args[@]}" > "$output_file"
+        }
+
+        daily_file="$(mktemp)"
+        monthly_file="$(mktemp)"
+        trap "rm -f \"$daily_file\" \"$monthly_file\"" EXIT
+        run_ccusage daily "$daily_file"
+        run_ccusage monthly "$monthly_file"
+
+        python3 - "$daily_file" "$monthly_file" <<PY
+import json
+import sys
+
+
+def section(path, name):
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if isinstance(payload, dict):
+        rows = payload.get(name, [])
+        return rows if isinstance(rows, list) else []
+    return payload if isinstance(payload, list) else []
+
+
+json.dump(
+    {
+        "daily": section(sys.argv[1], "daily"),
+        "monthly": section(sys.argv[2], "monthly"),
+    },
+    sys.stdout,
+)
+PY
     '
 }
 
@@ -682,13 +716,13 @@ if [ "$REMOVE_TRAY_AUTOSTART" -eq 1 ]; then
     exit 0
 fi
 
-if [ "$DUMP_CLAUDE_MONTH_JSON" -eq 1 ]; then
+if [ "$DUMP_CLAUDE_TRAY_JSON" -eq 1 ]; then
     self_update "${ORIGINAL_ARGS[@]}"
-    CLAUDE_MONTH_FILE="$(mktemp)"
-    trap 'rm -f "$CLAUDE_MONTH_FILE"' EXIT
-    fetch_claude_month_data > "$CLAUDE_MONTH_FILE"
-    refresh_pricing_history "$CLAUDE_MONTH_FILE"
-    cat "$CLAUDE_MONTH_FILE"
+    CLAUDE_TRAY_FILE="$(mktemp)"
+    trap 'rm -f "$CLAUDE_TRAY_FILE"' EXIT
+    fetch_claude_tray_data > "$CLAUDE_TRAY_FILE"
+    refresh_pricing_history "$CLAUDE_TRAY_FILE"
+    cat "$CLAUDE_TRAY_FILE"
     exit 0
 fi
 
