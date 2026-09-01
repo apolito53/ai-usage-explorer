@@ -213,20 +213,34 @@ fetch_usage_data() {
     AI_USAGE_PROJECT="$PROJECT" \
     AI_USAGE_OFFLINE="$OFFLINE" \
     bash -lic '
-        if ! command -v nvm >/dev/null 2>&1; then
-            echo "ERROR: nvm is required to run ccusage. Install nvm and Node 22, or load your shell profile before running this script." >&2
-            exit 1
-        fi
-        nvm use 22 >/dev/null
-        if ! command -v pnpm >/dev/null 2>&1; then
-            if command -v corepack >/dev/null 2>&1; then
-                corepack enable pnpm >/dev/null 2>&1 || true
+        for candidate in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
+            if [ -d "$candidate" ]; then
+                PATH="$candidate:$PATH"
             fi
+        done
+        if [ -s "$HOME/.nvm/nvm.sh" ]; then
+            . "$HOME/.nvm/nvm.sh"
         fi
-        if ! command -v pnpm >/dev/null 2>&1; then
-            echo "ERROR: pnpm is required to run ccusage via pnpm dlx. Install pnpm or enable corepack for Node 22." >&2
+        if command -v nvm >/dev/null 2>&1; then
+            nvm use 22 >/dev/null 2>&1 || nvm use default >/dev/null 2>&1 || true
+        fi
+        if ! command -v node >/dev/null 2>&1; then
+            echo "ERROR: Node.js is required to run ccusage. Install Node 22 or load your Node environment before running this script." >&2
             exit 1
         fi
+
+        run_ccusage_cli() {
+            if command -v ccusage >/dev/null 2>&1; then
+                ccusage "$@"
+            elif command -v pnpm >/dev/null 2>&1; then
+                pnpm dlx ccusage "$@"
+            elif command -v npx >/dev/null 2>&1; then
+                npx --yes ccusage@latest "$@"
+            else
+                echo "ERROR: Install ccusage, pnpm, or npm/npx to load usage data." >&2
+                return 1
+            fi
+        }
 
         build_provider_args() {
             local provider="$1"
@@ -252,8 +266,7 @@ fetch_usage_data() {
         for provider in claude codex; do
             for period in daily monthly; do
                 build_provider_args "$provider" "$period"
-                # pnpm dlx downloads ccusage on demand when it is not already cached.
-                pnpm dlx ccusage "${args[@]}" > "$data_dir/$provider-$period.json"
+                run_ccusage_cli "${args[@]}" > "$data_dir/$provider-$period.json"
             done
         done
 
@@ -387,11 +400,21 @@ fetch_claude_tray_data() {
     AI_USAGE_PROJECT="$PROJECT" \
     AI_USAGE_OFFLINE="$OFFLINE" \
     bash -lic '
-        if ! command -v nvm >/dev/null 2>&1; then
-            echo "ERROR: nvm is required to run ccusage. Install nvm and Node 22, or load your shell profile before running this script." >&2
+        for candidate in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
+            if [ -d "$candidate" ]; then
+                PATH="$candidate:$PATH"
+            fi
+        done
+        if [ -s "$HOME/.nvm/nvm.sh" ]; then
+            . "$HOME/.nvm/nvm.sh"
+        fi
+        if command -v nvm >/dev/null 2>&1; then
+            nvm use 22 >/dev/null 2>&1 || nvm use default >/dev/null 2>&1 || true
+        fi
+        if ! command -v node >/dev/null 2>&1; then
+            echo "ERROR: Node.js is required to run ccusage. Install Node 22 or load your Node environment before running this script." >&2
             exit 1
         fi
-        nvm use 22 >/dev/null
 
         # Prefer an already-installed or pnpm-cached ccusage binary. A one-minute
         # tray poll should not ask the package registry the same question forever.
@@ -399,23 +422,32 @@ fetch_claude_tray_data() {
         if [ -z "$ccusage_bin" ]; then
             cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/pnpm/dlx"
             if [ -d "$cache_root" ]; then
-                ccusage_bin="$(
-                    find "$cache_root" -path "*/node_modules/.bin/ccusage" -type f -perm -u+x -printf "%T@ %p\n" 2>/dev/null \
-                        | sort -nr \
-                        | sed -n "1{s/^[^ ]* //;p;}"
-                )"
+                if find "$cache_root" -maxdepth 0 -printf "" >/dev/null 2>&1; then
+                    ccusage_bin="$(
+                        find "$cache_root" -path "*/node_modules/.bin/ccusage" -type f -perm -u+x -printf "%T@ %p\n" 2>/dev/null \
+                            | sort -nr \
+                            | sed -n "1{s/^[^ ]* //;p;}"
+                    )"
+                else
+                    ccusage_bin="$(
+                        find "$cache_root" -path "*/node_modules/.bin/ccusage" -type f -print 2>/dev/null \
+                            | sed -n "1p"
+                    )"
+                fi
+                if [ -n "$ccusage_bin" ] && [ ! -x "$ccusage_bin" ]; then
+                    ccusage_bin=""
+                fi
             fi
         fi
 
-        ensure_pnpm() {
-            if ! command -v pnpm >/dev/null 2>&1; then
-                if command -v corepack >/dev/null 2>&1; then
-                    corepack enable pnpm >/dev/null 2>&1 || true
-                fi
-            fi
-            if ! command -v pnpm >/dev/null 2>&1; then
-                echo "ERROR: pnpm is required to run ccusage via pnpm dlx. Install pnpm or enable corepack for Node 22." >&2
-                exit 1
+        run_package_ccusage() {
+            if command -v pnpm >/dev/null 2>&1; then
+                pnpm dlx ccusage "$@"
+            elif command -v npx >/dev/null 2>&1; then
+                npx --yes ccusage@latest "$@"
+            else
+                echo "ERROR: Install ccusage, pnpm, or npm/npx to load usage data." >&2
+                return 1
             fi
         }
 
@@ -432,8 +464,7 @@ fetch_claude_tray_data() {
             if [ -n "$ccusage_bin" ] && "$ccusage_bin" "${args[@]}" > "$output_file"; then
                 return
             fi
-            ensure_pnpm
-            pnpm dlx ccusage "${args[@]}" > "$output_file"
+            run_package_ccusage "${args[@]}" > "$output_file"
         }
 
         daily_file="$(mktemp)"

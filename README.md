@@ -16,7 +16,10 @@ When `rtk` is available, the bottom row includes an `RTK Gain` panel with curren
 
 On startup, the script checks for required Python packages. If they are missing, it creates `.venv` and installs them before launching the terminal UI.
 
-`ccusage` does not need to be installed globally. The data fetch path runs `pnpm dlx ccusage`, so `pnpm` downloads or reuses `ccusage` on demand. The script expects `nvm`, Node 22, and `pnpm` to be available in the login shell used for fetching.
+`ccusage` does not need to be installed globally. The data fetch path prefers an
+installed `ccusage`, then uses `pnpm dlx` or `npx` on demand. Node 22 is
+recommended; `~/.nvm/nvm.sh` and common Homebrew paths are detected
+automatically.
 
 ## Ubuntu Tray Indicator
 
@@ -43,6 +46,13 @@ To launch the tray automatically after signing in to Ubuntu:
 ```
 
 This first verifies that the host is Ubuntu or an Ubuntu-derived Linux distribution, then installs `ai-usage-explorer-tray.desktop` in the current user's XDG autostart directory. At login, the launcher checks the Git upstream, safely fast-forwards when possible, and verifies the Python dependencies before starting the tray. The tray's later data polls skip the Git check. Unsupported operating systems are rejected without writing a startup file. The entry points at the current checkout, so moving or deleting the checkout requires reinstalling it. Remove it with `./ai-usage-explorer.sh --remove-tray-autostart`.
+
+## macOS Menu-Bar App
+
+The personal Claude usage companion also has a lightweight macOS menu-bar
+frontend. It reuses the same local `ccusage` and pricing paths without requiring
+a hosted service or shared account. See [macos/README.md](macos/README.md) for
+requirements, installation, and the real-Mac smoke-test checklist.
 
 ## Versioning and Updates
 
