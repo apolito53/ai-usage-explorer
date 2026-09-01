@@ -733,10 +733,10 @@ if [ "$DUMP_JSON" -eq 1 ]; then
 fi
 
 self_update "${ORIGINAL_ARGS[@]}"
+ensure_python_dependencies
 if [ "$TRAY" -eq 1 ]; then
     run_tray
 fi
-ensure_python_dependencies
 
 DATA_FILE="$JSON_FILE"
 if [ -z "$DATA_FILE" ]; then

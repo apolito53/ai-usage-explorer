@@ -143,11 +143,31 @@ class TraySummaryTests(unittest.TestCase):
         entry = TRAY.desktop_entry(Path("/tmp/AI Usage/ai-usage-explorer.sh"))
 
         self.assertIn(
-            'Exec="/tmp/AI Usage/ai-usage-explorer.sh" --tray --no-update',
+            'Exec="/tmp/AI Usage/ai-usage-explorer.sh" --tray',
             entry,
         )
+        self.assertNotIn("--no-update", entry)
         self.assertIn("X-GNOME-Autostart-enabled=true", entry)
         self.assertIn("Terminal=false", entry)
+
+    def test_tray_poll_skips_the_startup_update_check(self):
+        config = TRAY.TrayConfig(
+            script_path=ROOT / "ai-usage-explorer.sh",
+            pricing_history_path=ROOT / ".ai-usage-pricing-history.json",
+            project="",
+            online=False,
+            refresh_pricing=True,
+            refresh_seconds=60,
+            autostart_action=None,
+        )
+
+        command = TRAY.fetch_command(
+            config,
+            refresh_pricing=False,
+            now=datetime(2026, 8, 18, 12, 0),
+        )
+
+        self.assertIn("--no-update", command)
 
     def test_autostart_install_and_remove_are_scoped_to_one_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

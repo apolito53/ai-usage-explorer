@@ -40,7 +40,7 @@ To launch the tray automatically after signing in to Ubuntu:
 ./ai-usage-explorer.sh --install-tray-autostart
 ```
 
-This first verifies that the host is Ubuntu or an Ubuntu-derived Linux distribution, then installs `ai-usage-explorer-tray.desktop` in the current user's XDG autostart directory. Unsupported operating systems are rejected without writing a startup file. The entry points at the current checkout, so moving or deleting the checkout requires reinstalling it. Remove it with `./ai-usage-explorer.sh --remove-tray-autostart`.
+This first verifies that the host is Ubuntu or an Ubuntu-derived Linux distribution, then installs `ai-usage-explorer-tray.desktop` in the current user's XDG autostart directory. At login, the launcher checks the Git upstream, safely fast-forwards when possible, and verifies the Python dependencies before starting the tray. The tray's later data polls skip the Git check. Unsupported operating systems are rejected without writing a startup file. The entry points at the current checkout, so moving or deleting the checkout requires reinstalling it. Remove it with `./ai-usage-explorer.sh --remove-tray-autostart`.
 
 ## Versioning and Updates
 

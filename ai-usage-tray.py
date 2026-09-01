@@ -241,7 +241,7 @@ def desktop_exec_arg(value: str) -> str:
 
 
 def desktop_entry(script_path: Path) -> str:
-    command = f"{desktop_exec_arg(str(script_path))} --tray --no-update"
+    command = f"{desktop_exec_arg(str(script_path))} --tray"
     return "\n".join(
         (
             "[Desktop Entry]",
