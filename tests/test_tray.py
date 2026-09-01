@@ -25,6 +25,51 @@ class TraySummaryTests(unittest.TestCase):
     def test_configured_symbolic_icon_exists(self):
         self.assertTrue((ROOT / "assets" / f"{TRAY.ICON_NAME}.svg").is_file())
 
+    def test_native_appindicator_fallback_exposes_required_interface(self):
+        class FakeFunction:
+            def __init__(self, result=None):
+                self.result = result
+                self.calls = []
+
+            def __call__(self, *args):
+                self.calls.append(args)
+                return self.result
+
+        class FakeLibrary:
+            app_indicator_new = FakeFunction(123)
+            app_indicator_set_icon_theme_path = FakeFunction()
+            app_indicator_set_status = FakeFunction()
+            app_indicator_set_title = FakeFunction()
+            app_indicator_set_label = FakeFunction()
+            app_indicator_set_menu = FakeFunction()
+
+        library = FakeLibrary()
+        adapter = TRAY.CtypesAppIndicator(
+            library,
+            pointer_from_gobject=lambda _value: 456,
+        )
+        indicator = adapter.Indicator.new(
+            "test-id",
+            "test-icon",
+            adapter.IndicatorCategory.SYSTEM_SERVICES,
+        )
+
+        indicator.set_icon_theme_path("/tmp/icons")
+        indicator.set_status(adapter.IndicatorStatus.ACTIVE)
+        indicator.set_title("Usage")
+        indicator.set_label("$1.00", "$9,999.99")
+        indicator.set_menu(object())
+
+        self.assertEqual((b"test-id", b"test-icon", 2), library.app_indicator_new.calls[0])
+        self.assertEqual((123, b"/tmp/icons"), library.app_indicator_set_icon_theme_path.calls[0])
+        self.assertEqual((123, 1), library.app_indicator_set_status.calls[0])
+        self.assertEqual((123, b"Usage"), library.app_indicator_set_title.calls[0])
+        self.assertEqual(
+            (123, b"$1.00", b"$9,999.99"),
+            library.app_indicator_set_label.calls[0],
+        )
+        self.assertEqual((123, 456), library.app_indicator_set_menu.calls[0])
+
     def test_default_poll_interval_is_one_minute(self):
         self.assertEqual(60, TRAY.DEFAULT_REFRESH_SECONDS)
 

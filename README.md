@@ -28,7 +28,7 @@ The indicator shows Claude's current calendar-month cost next to a monochrome us
 
 While running, the tray silently checks the Git upstream once per hour. Current versions and failed checks produce no menu status or notification. When a fast-forward update is available, the tray shows its revision in the menu and sends one desktop notification; it does not repeat the notification for the same revision. Set `AI_USAGE_EXPLORER_TRAY_UPDATE_SECONDS` to change the interval (minimum 300 seconds).
 
-The tray uses Ubuntu's AppIndicator support and the system Python GTK bindings. On current Ubuntu releases, install them with:
+The tray uses Ubuntu's AppIndicator support and the system Python GTK bindings. It can use the native AppIndicator library directly on older Ubuntu releases where the optional Python typelib is absent. On current Ubuntu releases, install the bindings with:
 
 ```bash
 sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
