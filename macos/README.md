@@ -59,3 +59,6 @@ installation, verify:
 5. The item returns after logging out and back in.
 
 If startup fails, inspect `~/Library/Logs/AI Usage Explorer/stderr.log`.
+
+For implementation details, see the repository
+[architecture](../docs/ARCHITECTURE.md) and [codebase index](../CODEBASE_INDEX.md).

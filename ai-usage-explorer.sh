@@ -4,7 +4,6 @@
 # Examples:
 #   ./ai-usage-explorer.sh
 #   ./ai-usage-explorer.sh --since 20260401
-#   ./ai-usage-explorer.sh --group month
 #   ./ai-usage-explorer.sh --refresh
 #   ./ai-usage-explorer.sh --demo
 #   ./ai-usage-explorer.sh --file /tmp/ccusage-daily.json
@@ -46,7 +45,7 @@ Options:
   --since YYYYMMDD     Start date for ccusage daily data (default: 20260209)
   --until YYYYMMDD     End date for ccusage daily data
   --project NAME       Pass through Claude ccusage --project
-  --group day|month    Initial grouping (default: day)
+  --group day|month    Accepted for compatibility; current view remains daily
   --refresh            Fetch current model pricing instead of ccusage --offline
   --demo               Load bundled demo data instead of running ccusage
   --file PATH          Load an existing ccusage JSON file
@@ -67,7 +66,6 @@ Keyboard:
   g/G                  Jump to first/last day
   a                    Cycle provider filter
   m                    Open model filter menu
-  p                    Toggle day/month grouping
   esc or v             Open date range menu
   space/enter          Expand selected row model breakdown
   ←/→                  Cycle sort column (prev/next)
