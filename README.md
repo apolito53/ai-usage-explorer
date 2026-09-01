@@ -26,7 +26,7 @@ On startup, the script checks for required Python packages. If they are missing,
 
 The indicator shows Claude's current calendar-month cost next to a monochrome usage icon and refreshes once per minute. Its menu always displays both month-to-date and today's cost, and lets you choose which one appears in the panel; month-to-date is selected by default. The menu can also refresh immediately, open the full terminal explorer, or quit. The first poll refreshes the cached model price cards; later polls reuse them so the tray does not hit pricing sources every minute.
 
-The tray uses Ubuntu's AppIndicator support and the system Python GTK bindings. On current Ubuntu releases, install them with:
+The tray uses Ubuntu's AppIndicator support and the system Python GTK bindings. It can use the native AppIndicator library directly on older Ubuntu releases where the optional Python typelib is absent. On current Ubuntu releases, install the bindings with:
 
 ```bash
 sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1

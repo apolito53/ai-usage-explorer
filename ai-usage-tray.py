@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
 import importlib
 import json
 import os
@@ -389,6 +391,120 @@ def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, float
     return claude_month_cost(data, now), claude_today_cost(data, now), now
 
 
+def _gobject_pointer(value) -> int:
+    """Return the native pointer held by a PyGObject wrapper."""
+    capsule = getattr(value, "__gpointer__", None)
+    if capsule is None:
+        raise TypeError("expected a PyGObject value")
+    get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+    get_pointer.restype = ctypes.c_void_p
+    get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    pointer = get_pointer(capsule, None)
+    if not pointer:
+        raise RuntimeError("could not access the native GTK object")
+    return pointer
+
+
+class _CtypesIndicator:
+    def __init__(self, adapter, pointer: int):
+        self._adapter = adapter
+        self._pointer = pointer
+
+    @staticmethod
+    def _text(value: str) -> bytes:
+        return str(value).encode("utf-8")
+
+    def set_icon_theme_path(self, path: str) -> None:
+        self._adapter.library.app_indicator_set_icon_theme_path(
+            self._pointer,
+            self._text(path),
+        )
+
+    def set_status(self, status: int) -> None:
+        self._adapter.library.app_indicator_set_status(self._pointer, status)
+
+    def set_title(self, title: str) -> None:
+        self._adapter.library.app_indicator_set_title(
+            self._pointer,
+            self._text(title),
+        )
+
+    def set_label(self, label: str, guide: str) -> None:
+        self._adapter.library.app_indicator_set_label(
+            self._pointer,
+            self._text(label),
+            self._text(guide),
+        )
+
+    def set_menu(self, menu) -> None:
+        self._adapter.library.app_indicator_set_menu(
+            self._pointer,
+            self._adapter.pointer_from_gobject(menu),
+        )
+
+
+class _CtypesIndicatorFactory:
+    def __init__(self, adapter):
+        self._adapter = adapter
+
+    def new(self, app_id: str, icon_name: str, category: int):
+        pointer = self._adapter.library.app_indicator_new(
+            app_id.encode("utf-8"),
+            icon_name.encode("utf-8"),
+            category,
+        )
+        if not pointer:
+            raise RuntimeError("the native AppIndicator library could not create an indicator")
+        return _CtypesIndicator(self._adapter, pointer)
+
+
+class CtypesAppIndicator:
+    """Small adapter for hosts that have libappindicator but no GI typelib."""
+
+    class IndicatorCategory:
+        SYSTEM_SERVICES = 2
+
+    class IndicatorStatus:
+        ACTIVE = 1
+
+    def __init__(self, library, pointer_from_gobject=_gobject_pointer):
+        self.library = library
+        self.pointer_from_gobject = pointer_from_gobject
+        self._configure_library()
+        self.Indicator = _CtypesIndicatorFactory(self)
+
+    def _configure_library(self) -> None:
+        char_pointer = ctypes.c_char_p
+        void_pointer = ctypes.c_void_p
+        integer = ctypes.c_int
+        signatures = {
+            "app_indicator_new": ([char_pointer, char_pointer, integer], void_pointer),
+            "app_indicator_set_icon_theme_path": ([void_pointer, char_pointer], None),
+            "app_indicator_set_status": ([void_pointer, integer], None),
+            "app_indicator_set_title": ([void_pointer, char_pointer], None),
+            "app_indicator_set_label": (
+                [void_pointer, char_pointer, char_pointer],
+                None,
+            ),
+            "app_indicator_set_menu": ([void_pointer, void_pointer], None),
+        }
+        for name, (argument_types, result_type) in signatures.items():
+            function = getattr(self.library, name)
+            function.argtypes = argument_types
+            function.restype = result_type
+
+
+def load_ctypes_app_indicator():
+    library_name = ctypes.util.find_library("appindicator3")
+    if not library_name:
+        return None
+    try:
+        library = ctypes.CDLL(library_name)
+        return CtypesAppIndicator(library)
+    except (AttributeError, OSError):
+        return None
+
+
 def load_gtk():
     try:
         import gi
@@ -409,10 +525,13 @@ def load_gtk():
         except (ImportError, ValueError):
             continue
     if indicator_module is None:
-        raise RuntimeError(
-            "an AppIndicator typelib is required (install "
-            "gir1.2-ayatanaappindicator3-0.1 or gir1.2-appindicator3-0.1)"
-        )
+        indicator_module = load_ctypes_app_indicator()
+        if indicator_module is None:
+            raise RuntimeError(
+                "AppIndicator support is required (install "
+                "gir1.2-ayatanaappindicator3-0.1 or "
+                "gir1.2-appindicator3-0.1)"
+            )
     return Gtk, GLib, indicator_module
 
 
