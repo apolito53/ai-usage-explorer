@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, call, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,6 +129,7 @@ class TraySummaryTests(unittest.TestCase):
             online=False,
             refresh_pricing=True,
             refresh_seconds=60,
+            update_check_seconds=3600,
             autostart_action=None,
         )
         now = datetime(2026, 8, 18, 12, 0)
@@ -158,6 +161,7 @@ class TraySummaryTests(unittest.TestCase):
             online=False,
             refresh_pricing=True,
             refresh_seconds=60,
+            update_check_seconds=3600,
             autostart_action=None,
         )
 
@@ -168,6 +172,87 @@ class TraySummaryTests(unittest.TestCase):
         )
 
         self.assertIn("--no-update", command)
+
+    def test_fast_forward_update_revision_is_detected(self):
+        with patch.object(
+            TRAY,
+            "git_output",
+            side_effect=[
+                str(ROOT),
+                "origin/master",
+                "",
+                "0\t2",
+                "abc1234",
+            ],
+        ):
+            revision = TRAY.available_update_revision(
+                ROOT / "ai-usage-explorer.sh"
+            )
+
+        self.assertEqual("abc1234", revision)
+
+    def test_current_or_diverged_checkout_has_no_available_update(self):
+        for counts in ("0\t0", "1\t2"):
+            with self.subTest(counts=counts), patch.object(
+                TRAY,
+                "git_output",
+                side_effect=[str(ROOT), "origin/master", "", counts],
+            ):
+                revision = TRAY.available_update_revision(
+                    ROOT / "ai-usage-explorer.sh"
+                )
+
+            self.assertEqual("", revision)
+
+    def test_update_check_failure_is_silent(self):
+        tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
+        tray.checking_for_update = True
+        tray.available_update_revision = None
+        tray.update_item = Mock()
+
+        with patch.object(TRAY, "notify_update_available") as notify:
+            result = tray._finish_update_check(None)
+
+        self.assertFalse(result)
+        tray.update_item.set_label.assert_not_called()
+        tray.update_item.show.assert_not_called()
+        notify.assert_not_called()
+
+    def test_available_update_is_shown_and_not_repeated(self):
+        tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
+        tray.checking_for_update = True
+        tray.available_update_revision = None
+        tray.update_item = Mock()
+
+        with patch.object(TRAY, "notify_update_available") as notify:
+            tray._finish_update_check("abc1234")
+            tray._finish_update_check("abc1234")
+
+        tray.update_item.set_label.assert_called_once_with(
+            "Update available · abc1234"
+        )
+        tray.update_item.show.assert_called_once_with()
+        notify.assert_called_once_with("abc1234")
+
+    def test_tray_schedules_hourly_update_checks(self):
+        tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
+        tray.config = SimpleNamespace(
+            refresh_seconds=60,
+            update_check_seconds=3600,
+        )
+        tray.GLib = SimpleNamespace(timeout_add_seconds=Mock())
+        tray.refresh = Mock()
+
+        tray.start()
+
+        tray.refresh.assert_called_once_with()
+        self.assertEqual(
+            [
+                call(60, tray._scheduled_refresh),
+                call(3600, tray._scheduled_update_check),
+            ],
+            tray.GLib.timeout_add_seconds.call_args_list,
+        )
 
     def test_autostart_install_and_remove_are_scoped_to_one_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

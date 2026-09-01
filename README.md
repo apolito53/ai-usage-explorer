@@ -26,6 +26,8 @@ On startup, the script checks for required Python packages. If they are missing,
 
 The indicator shows Claude's current calendar-month cost next to a monochrome usage icon and refreshes once per minute. Its menu always displays both month-to-date and today's cost, and lets you choose which one appears in the panel; month-to-date is selected by default. The menu can also refresh immediately, open the full terminal explorer, or quit. The first poll refreshes the cached model price cards; later polls reuse them so the tray does not hit pricing sources every minute.
 
+While running, the tray silently checks the Git upstream once per hour. Current versions and failed checks produce no menu status or notification. When a fast-forward update is available, the tray shows its revision in the menu and sends one desktop notification; it does not repeat the notification for the same revision. Set `AI_USAGE_EXPLORER_TRAY_UPDATE_SECONDS` to change the interval (minimum 300 seconds).
+
 The tray uses Ubuntu's AppIndicator support and the system Python GTK bindings. On current Ubuntu releases, install them with:
 
 ```bash

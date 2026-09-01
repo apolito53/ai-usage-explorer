@@ -21,8 +21,11 @@ from typing import Dict, Optional, Tuple
 APP_ID = "ai-usage-explorer"
 ICON_NAME = "ai-usage-claude-symbolic"
 DEFAULT_REFRESH_SECONDS = 60
+DEFAULT_UPDATE_CHECK_SECONDS = 60 * 60
+MIN_UPDATE_CHECK_SECONDS = 5 * 60
 DEFAULT_DISPLAY_PERIOD = "month"
 FETCH_TIMEOUT_SECONDS = 45
+UPDATE_CHECK_TIMEOUT_SECONDS = 20
 AUTOSTART_FILENAME = "ai-usage-explorer-tray.desktop"
 OS_RELEASE_PATH = Path("/etc/os-release")
 
@@ -230,6 +233,7 @@ class TrayConfig:
     online: bool
     refresh_pricing: bool
     refresh_seconds: int
+    update_check_seconds: int
     autostart_action: Optional[str]
 
 
@@ -389,6 +393,76 @@ def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, float
     return claude_month_cost(data, now), claude_today_cost(data, now), now
 
 
+def git_output(repo_path: Path, *args: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=UPDATE_CHECK_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def available_update_revision(script_path: Path) -> Optional[str]:
+    """Return a fast-forward update revision, or stay quiet when none can be found."""
+    repo_path = script_path.resolve().parent
+    git_root = git_output(repo_path, "rev-parse", "--show-toplevel")
+    if git_root is None or Path(git_root).resolve() != repo_path:
+        return None
+    if git_output(
+        repo_path,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{u}",
+    ) is None:
+        return None
+    if git_output(repo_path, "fetch", "--quiet") is None:
+        return None
+
+    counts = git_output(
+        repo_path,
+        "rev-list",
+        "--left-right",
+        "--count",
+        "HEAD...@{u}",
+    )
+    if counts is None:
+        return None
+    try:
+        local_ahead, remote_ahead = (int(value) for value in counts.split())
+    except (TypeError, ValueError):
+        return None
+    if local_ahead != 0 or remote_ahead == 0:
+        return ""
+    return git_output(repo_path, "rev-parse", "--short", "@{u}")
+
+
+def notify_update_available(revision: str) -> None:
+    notifier = shutil.which("notify-send")
+    if not notifier:
+        return
+    try:
+        subprocess.Popen(
+            [
+                notifier,
+                "AI Usage Explorer update available",
+                f"Revision {revision} is ready. Restart the tray to install it.",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
 def load_gtk():
     try:
         import gi
@@ -423,6 +497,8 @@ class ClaudeUsageTray:
         self.GLib = glib
         self.AppIndicator = app_indicator
         self.refreshing = False
+        self.checking_for_update = False
+        self.available_update_revision: Optional[str] = None
         self.has_refreshed_pricing = not config.refresh_pricing
         self.display_period = DEFAULT_DISPLAY_PERIOD
         self.month_cost: Optional[float] = None
@@ -454,12 +530,14 @@ class ClaudeUsageTray:
         self.today_total_item = self._disabled_item("Today: …")
         self.updated_item = self._disabled_item("Not refreshed yet")
         self.status_item = self._disabled_item("")
+        self.update_item = self._disabled_item("")
         for item in (
             self.month_item,
             self.month_total_item,
             self.today_total_item,
             self.updated_item,
             self.status_item,
+            self.update_item,
         ):
             menu.append(item)
         menu.append(self.Gtk.SeparatorMenuItem())
@@ -494,6 +572,7 @@ class ClaudeUsageTray:
         menu.append(quit_item)
         menu.show_all()
         self.status_item.hide()
+        self.update_item.hide()
         return menu
 
     def _set_status(self, message: str):
@@ -528,10 +607,39 @@ class ClaudeUsageTray:
             self.config.refresh_seconds,
             self._scheduled_refresh,
         )
+        self.GLib.timeout_add_seconds(
+            self.config.update_check_seconds,
+            self._scheduled_update_check,
+        )
 
     def _scheduled_refresh(self):
         self.refresh()
         return True
+
+    def _scheduled_update_check(self):
+        self.check_for_updates()
+        return True
+
+    def check_for_updates(self):
+        if self.checking_for_update:
+            return
+        self.checking_for_update = True
+
+        def worker():
+            revision = available_update_revision(self.config.script_path)
+            self.GLib.idle_add(self._finish_update_check, revision)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_update_check(self, revision: Optional[str]):
+        self.checking_for_update = False
+        if not revision or revision == self.available_update_revision:
+            return False
+        self.available_update_revision = revision
+        self.update_item.set_label(f"Update available · {revision}")
+        self.update_item.show()
+        notify_update_available(revision)
+        return False
 
     def refresh(self, _item=None):
         if self.refreshing:
@@ -641,9 +749,23 @@ def parse_args(argv=None) -> TrayConfig:
             )
         ),
     )
+    parser.add_argument(
+        "--update-check-seconds",
+        type=int,
+        default=int(
+            os.environ.get(
+                "AI_USAGE_EXPLORER_TRAY_UPDATE_SECONDS",
+                DEFAULT_UPDATE_CHECK_SECONDS,
+            )
+        ),
+    )
     args = parser.parse_args(argv)
     if args.refresh_seconds < 10:
         parser.error("--refresh-seconds must be at least 10")
+    if args.update_check_seconds < MIN_UPDATE_CHECK_SECONDS:
+        parser.error(
+            f"--update-check-seconds must be at least {MIN_UPDATE_CHECK_SECONDS}"
+        )
     return TrayConfig(
         script_path=args.script.resolve(),
         pricing_history_path=args.pricing_history.resolve(),
@@ -651,6 +773,7 @@ def parse_args(argv=None) -> TrayConfig:
         online=args.online,
         refresh_pricing=args.refresh_pricing,
         refresh_seconds=args.refresh_seconds,
+        update_check_seconds=args.update_check_seconds,
         autostart_action=args.autostart_action,
     )
 
