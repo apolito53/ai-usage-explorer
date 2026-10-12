@@ -8,6 +8,7 @@ import ctypes
 import ctypes.util
 import importlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -227,6 +228,35 @@ def format_cost(value: float) -> str:
     return f"${value:,.2f}"
 
 
+def claude_daily_costs(data: Dict, now: datetime) -> Tuple[Tuple[date, float], ...]:
+    """Current month through today, including zero-spend days in the time axis."""
+    costs = {}
+    rows = data.get("daily", [])
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        value = row_date(row)
+        parsed = parse_row_date(value) if len(value) in (8, 10) else None
+        if parsed is None or (parsed.year, parsed.month) != (now.year, now.month):
+            continue
+        cost = safe_float(row.get("totalCost"))
+        if parsed.day <= now.day and math.isfinite(cost) and cost >= 0:
+            costs[parsed.day] = costs.get(parsed.day, 0.0) + cost
+    return tuple(
+        (date(now.year, now.month, day), costs.get(day, 0.0))
+        for day in range(1, now.day + 1)
+    )
+
+
+@dataclass(frozen=True)
+class UsageSnapshot:
+    month_cost: float
+    today_cost: float
+    refreshed_at: datetime
+    daily_costs: Tuple[Tuple[date, float], ...]
+    intraday: object = None
+
+
 @dataclass(frozen=True)
 class TrayConfig:
     script_path: Path
@@ -368,6 +398,12 @@ def fetch_command(config: TrayConfig, refresh_pricing: bool, now: datetime) -> l
 
 
 def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, float, datetime]:
+    """Keep the shared totals interface used by the macOS companion."""
+    snapshot = fetch_usage_snapshot(config, refresh_pricing)
+    return snapshot.month_cost, snapshot.today_cost, snapshot.refreshed_at
+
+
+def fetch_usage_snapshot(config: TrayConfig, refresh_pricing: bool, log_reader=None) -> UsageSnapshot:
     now = datetime.now()
     result = subprocess.run(
         fetch_command(config, refresh_pricing, now),
@@ -391,8 +427,35 @@ def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, float
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError("ccusage returned invalid JSON") from exc
-    backfill_missing_costs(data, read_pricing_history(config.pricing_history_path))
-    return claude_month_cost(data, now), claude_today_cost(data, now), now
+    history = read_pricing_history(config.pricing_history_path)
+    backfill_missing_costs(data, history)
+    intraday = None
+    if log_reader is not None:
+        from ai_usage_intraday import IntradayUsage
+
+        snapshot = pricing_snapshot_for_date(history, now.date().isoformat())
+
+        def price_event(event):
+            if event.recorded_cost is not None and event.recorded_cost > 0:
+                return event.recorded_cost
+            if not any(event.tokens):
+                return 0.0
+            model = event.model + ("-fast" if event.fast else "")
+            record = model_pricing_record(snapshot, model)
+            item = dict(zip(
+                ("inputTokens", "outputTokens", "cacheCreationTokens", "cacheReadTokens"),
+                event.tokens,
+            ))
+            return estimated_model_cost(item, record)
+
+        try:
+            intraday = log_reader.load(now, config.project, price_event)
+        except OSError as exc:
+            intraday = IntradayUsage(error=f"Could not read today's usage: {exc}")
+    return UsageSnapshot(
+        claude_month_cost(data, now), claude_today_cost(data, now), now,
+        claude_daily_costs(data, now), intraday,
+    )
 
 
 def git_output(repo_path: Path, *args: str) -> Optional[str]:
@@ -611,6 +674,8 @@ def load_gtk():
 
 class ClaudeUsageTray:
     def __init__(self, config: TrayConfig, gtk, glib, app_indicator):
+        from ai_usage_intraday import ClaudeLogReader
+
         self.config = config
         self.Gtk = gtk
         self.GLib = glib
@@ -622,6 +687,10 @@ class ClaudeUsageTray:
         self.display_period = DEFAULT_DISPLAY_PERIOD
         self.month_cost: Optional[float] = None
         self.today_cost: Optional[float] = None
+        self.snapshot: Optional[UsageSnapshot] = None
+        self.graph_window = None
+        self.status_message = ""
+        self.log_reader = ClaudeLogReader()
 
         icon_dir = Path(__file__).resolve().parent / "assets"
         self.indicator = app_indicator.Indicator.new(
@@ -661,6 +730,10 @@ class ClaudeUsageTray:
             menu.append(item)
         menu.append(self.Gtk.SeparatorMenuItem())
 
+        graphs_item = self.Gtk.MenuItem(label="Usage graphs…")
+        graphs_item.connect("activate", self.open_graphs)
+        menu.append(graphs_item)
+
         menu.append(self._disabled_item("Show in panel"))
         self.month_radio = self.Gtk.RadioMenuItem.new_with_label(
             None,
@@ -695,11 +768,14 @@ class ClaudeUsageTray:
         return menu
 
     def _set_status(self, message: str):
+        self.status_message = message
         self.status_item.set_label(message)
         if message:
             self.status_item.show()
         else:
             self.status_item.hide()
+        if self.graph_window is not None:
+            self.graph_window.set_status(message, self.refreshing)
 
     def _select_display_period(self, item, period: str):
         if not item.get_active():
@@ -769,23 +845,26 @@ class ClaudeUsageTray:
 
         def worker():
             try:
-                result = fetch_usage(
+                result = fetch_usage_snapshot(
                     self.config,
                     refresh_pricing=not self.has_refreshed_pricing,
+                    log_reader=self.log_reader,
                 )
             except Exception as exc:  # Keep the GTK loop alive on fetch failures.
                 self.GLib.idle_add(self._finish_error, str(exc))
             else:
-                self.GLib.idle_add(self._finish_success, *result)
+                self.GLib.idle_add(self._finish_success, result)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _finish_success(
         self,
-        month_cost: float,
-        today_cost: float,
-        refreshed_at: datetime,
+        snapshot: UsageSnapshot,
     ):
+        self.snapshot = snapshot
+        month_cost, today_cost, refreshed_at = (
+            snapshot.month_cost, snapshot.today_cost, snapshot.refreshed_at,
+        )
         self.has_refreshed_pricing = True
         self.month_cost = month_cost
         self.today_cost = today_cost
@@ -796,6 +875,8 @@ class ClaudeUsageTray:
         )
         self.today_total_item.set_label(f"Today: {format_cost(today_cost)}")
         self.updated_item.set_label("Updated " + refreshed_at.strftime("%-I:%M %p"))
+        if self.graph_window is not None:
+            self.graph_window.set_usage(snapshot)
         self._set_status("")
         self._finish_refresh()
         return False
@@ -809,6 +890,27 @@ class ClaudeUsageTray:
     def _finish_refresh(self):
         self.refreshing = False
         self.refresh_item.set_sensitive(True)
+        if self.graph_window is not None:
+            self.graph_window.set_status(self.status_message, False)
+
+    def open_graphs(self, _item=None):
+        if self.graph_window is None:
+            try:
+                from ai_usage_chart import UsageGraphWindow
+
+                self.graph_window = UsageGraphWindow(
+                    self.Gtk, self.refresh, self.config.project,
+                )
+            except (ImportError, ValueError) as exc:
+                self._set_status(
+                    "Charts require python3-gi-cairo (sudo apt install python3-gi-cairo)"
+                )
+                print(f"Could not open usage graphs: {exc}", file=sys.stderr)
+                return
+        if self.snapshot is not None:
+            self.graph_window.set_usage(self.snapshot)
+        self.graph_window.set_status(self.status_message, self.refreshing)
+        self.graph_window.present()
 
     def open_explorer(self, _item=None):
         explorer_args = [str(self.config.script_path)]

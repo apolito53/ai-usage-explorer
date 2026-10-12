@@ -10,6 +10,8 @@ editing so changes land on the correct side of that boundary.
 | --- | --- |
 | `ai-usage-explorer.sh` | CLI parsing, self-update, dependency setup, `ccusage` invocation, provider normalization, pricing snapshots, and the embedded Rich terminal UI |
 | `ai-usage-tray.py` | Shared Claude tray core plus the Ubuntu GTK/AppIndicator frontend |
+| `ai_usage_chart.py` | Ubuntu monthly and intraday chart window; loads GTK/Cairo lazily |
+| `ai_usage_intraday.py` | Read-only Claude log reader, duplicate handling, in-memory file reuse, and local-time interval grouping |
 | `macos/ai-usage-macos.py` | macOS AppKit menu-bar frontend; imports the shared tray core |
 | `macos/install.sh` | macOS dependency preflight and per-user LaunchAgent installation |
 | `macos/uninstall.sh` | Removes the macOS LaunchAgent and private Python environment |
@@ -54,7 +56,7 @@ They are implementation entry points, not part of the normal user-facing CLI.
 `ai-usage-tray.py` contains three layers:
 
 1. Pure usage and pricing helpers, from `safe_float` through `format_cost`.
-2. Shared process/update helpers: `TrayConfig`, `fetch_usage`, and
+2. Shared process/update helpers: `TrayConfig`, `fetch_usage_snapshot`, `fetch_usage`, and
    `available_update_revision`.
 3. Ubuntu integration: autostart helpers, the native AppIndicator fallback,
    `ClaudeUsageTray`, and `main`.
@@ -72,6 +74,8 @@ for it.
 | Historical rates or zero-cost repair | `tests/test_pricing.py` |
 | Provider/model filtering | `tests/test_model_filter.py` |
 | Claude totals, update polling, Ubuntu autostart, AppIndicator fallback | `tests/test_tray.py` |
+| Chart series, axis scaling, daily/cumulative views | `tests/test_chart.py` |
+| Timestamped records, duplicates, cache invalidation, intervals and timezones | `tests/test_intraday.py` |
 | macOS argument/escaping/platform behavior | `tests/test_macos.py` |
 
 The terminal tests extract selected functions and classes from the embedded

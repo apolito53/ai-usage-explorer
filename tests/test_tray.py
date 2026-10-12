@@ -5,7 +5,7 @@ import stat
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -121,6 +121,93 @@ class TraySummaryTests(unittest.TestCase):
     def test_panel_period_selects_the_corresponding_total(self):
         self.assertEqual(12.0, TRAY.display_period_cost("month", 12.0, 3.0))
         self.assertEqual(3.0, TRAY.display_period_cost("today", 12.0, 3.0))
+
+    def test_chart_days_are_sorted_combined_and_zero_filled_through_today(self):
+        usage = {"daily": [
+            {"date": "2026-08-03", "totalCost": "2.5"},
+            {"date": "20260801", "totalCost": 1},
+            {"date": "2026-08-03", "totalCost": 0.75},
+            {"date": "2026-07-31", "totalCost": 100},
+            {"date": "2026-08-04", "totalCost": 100},
+            {"date": "2026-08", "totalCost": 100},
+            {"date": "bad", "totalCost": 100},
+            {"date": "2026-08-02", "totalCost": "NaN"},
+            {"date": "2026-08-02", "totalCost": "Infinity"},
+            {"date": "2026-08-02", "totalCost": -1},
+            None,
+        ]}
+        self.assertEqual(
+            ((date(2026, 8, 1), 1.0), (date(2026, 8, 2), 0.0), (date(2026, 8, 3), 3.25)),
+            TRAY.claude_daily_costs(usage, datetime(2026, 8, 3)),
+        )
+
+    def test_chart_empty_month_and_leap_day(self):
+        for payload in ({}, {"daily": None}, {"daily": []}):
+            with self.subTest(payload=payload):
+                days = TRAY.claude_daily_costs(payload, datetime(2024, 2, 29))
+                self.assertEqual(29, len(days))
+                self.assertEqual((date(2024, 2, 29), 0.0), days[-1])
+                self.assertEqual(0.0, sum(cost for _day, cost in days))
+        self.assertEqual(
+            ((date(2026, 9, 1), 0.0),),
+            TRAY.claude_daily_costs({}, datetime(2026, 9, 1)),
+        )
+
+    def test_snapshot_uses_backfilled_daily_data_and_preserves_shared_totals_api(self):
+        config = SimpleNamespace(pricing_history_path=Path("/unused"))
+        now = datetime(2026, 8, 3)
+        response = SimpleNamespace(returncode=0, stdout='{"daily": [{"date": "2026-08-03", "totalCost": 0}]}')
+
+        def backfill(data, _history):
+            data["daily"][0]["totalCost"] = 12.5
+
+        with patch.object(TRAY, "datetime") as clock, \
+             patch.object(TRAY, "fetch_command", return_value=["fake"]), \
+             patch.object(TRAY.subprocess, "run", return_value=response), \
+             patch.object(TRAY, "read_pricing_history", return_value={}), \
+             patch.object(TRAY, "backfill_missing_costs", side_effect=backfill):
+            clock.now.return_value = now
+            clock.strptime.side_effect = datetime.strptime
+            snapshot = TRAY.fetch_usage_snapshot(config, False)
+            self.assertEqual((date(2026, 8, 3), 12.5), snapshot.daily_costs[-1])
+            self.assertEqual(12.5, snapshot.month_cost)
+            self.assertEqual(12.5, snapshot.today_cost)
+            self.assertEqual((12.5, 12.5, now), TRAY.fetch_usage(config, False))
+
+    def test_refresh_updates_open_chart_and_error_keeps_last_snapshot(self):
+        tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
+        tray.graph_window = Mock()
+        tray.refreshing = True
+        tray.display_period = "today"
+        for name in ("indicator", "month_item", "month_total_item", "today_total_item",
+                     "updated_item", "status_item", "refresh_item"):
+            setattr(tray, name, Mock())
+        snapshot = TRAY.UsageSnapshot(12.5, 3.0, datetime(2026, 8, 3), ())
+
+        tray._finish_success(snapshot)
+        tray.graph_window.set_usage.assert_called_once_with(snapshot)
+        tray.indicator.set_label.assert_called_with("$3.00", "$9,999.99")
+        tray._finish_error("offline")
+
+        self.assertIs(snapshot, tray.snapshot)
+        tray.graph_window.set_usage.assert_called_once()
+        tray.graph_window.set_status.assert_called_with("Refresh failed: offline", False)
+
+    def test_intraday_read_failure_does_not_discard_successful_totals(self):
+        config = SimpleNamespace(pricing_history_path=Path("/unused"), project="")
+        now = datetime(2026, 8, 3)
+        response = SimpleNamespace(returncode=0, stdout='{"daily": [{"date": "2026-08-03", "totalCost": 12.5}]}')
+        reader = Mock()
+        reader.load.side_effect = OSError("Session log unavailable")
+        with patch.object(TRAY, "datetime") as clock, \
+             patch.object(TRAY, "fetch_command", return_value=["fake"]), \
+             patch.object(TRAY.subprocess, "run", return_value=response), \
+             patch.object(TRAY, "read_pricing_history", return_value={}):
+            clock.now.return_value = now
+            clock.strptime.side_effect = datetime.strptime
+            snapshot = TRAY.fetch_usage_snapshot(config, False, reader)
+        self.assertEqual(12.5, snapshot.today_cost)
+        self.assertIn("Session log unavailable", snapshot.intraday.error)
 
     def test_zero_cost_model_is_backfilled_before_totaling(self):
         usage = {

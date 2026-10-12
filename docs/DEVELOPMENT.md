@@ -20,7 +20,7 @@ Run the checks appropriate to every code change:
 
 ```bash
 bash -n ai-usage-explorer.sh macos/install.sh macos/uninstall.sh
-python3 -m py_compile ai-usage-tray.py macos/ai-usage-macos.py
+python3 -m py_compile ai-usage-tray.py ai_usage_chart.py ai_usage_intraday.py macos/ai-usage-macos.py
 python3 -m unittest discover -s tests -v
 git diff --check
 ```

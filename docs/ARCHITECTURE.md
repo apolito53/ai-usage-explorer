@@ -105,6 +105,19 @@ The Ubuntu frontend loads GTK/AppIndicator only from its entry point. It can
 fall back to a small `ctypes` adapter when the native AppIndicator library is
 installed but the optional GI typelib is not.
 
+Its Usage graphs action lazily opens `ai_usage_chart.py`, a GTK/Cairo window
+with spending bars and cumulative area charts. `fetch_usage_snapshot` retains the daily
+series after pricing backfill so chart updates and panel totals share one poll.
+The existing `fetch_usage` tuple interface remains available to macOS.
+
+The Ubuntu poll also uses `ai_usage_intraday.py` to read timestamped Claude
+JSONL usage into memory. Unchanged files reuse parsed usage metadata; file
+replacement, truncation, and deletion invalidate it. Conversation content is
+discarded during parsing. The Today tab groups usage into 60-, 30-, 15-, 5-, or
+1-minute intervals without changing polling or persisting new usage history.
+Grouping starts at local midnight and uses elapsed time, preserving repeated
+hours across daylight-saving changes. Local log failures affect only Today.
+
 The macOS frontend dynamically imports the same module and supplies AppKit menu
 items, timers, Terminal launching, and AppleScript notifications. Cocoa imports
 are lazy, which keeps portable helper tests runnable on Linux.
