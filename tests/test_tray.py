@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import stat
 import sys
 import tempfile
@@ -9,6 +10,8 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
+
+from ai_usage_intraday import ClaudeLogReader
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,6 +181,8 @@ class TraySummaryTests(unittest.TestCase):
         tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
         tray.graph_window = Mock()
         tray.refreshing = True
+        tray.has_checked_updates = True
+        tray.applying_updates = False
         tray.display_period = "today"
         for name in ("indicator", "month_item", "month_total_item", "today_total_item",
                      "updated_item", "status_item", "refresh_item"):
@@ -198,7 +203,7 @@ class TraySummaryTests(unittest.TestCase):
         now = datetime(2026, 8, 3)
         response = SimpleNamespace(returncode=0, stdout='{"daily": [{"date": "2026-08-03", "totalCost": 12.5}]}')
         reader = Mock()
-        reader.load.side_effect = OSError("Session log unavailable")
+        reader.load_days.side_effect = OSError("Session log unavailable")
         with patch.object(TRAY, "datetime") as clock, \
              patch.object(TRAY, "fetch_command", return_value=["fake"]), \
              patch.object(TRAY.subprocess, "run", return_value=response), \
@@ -208,6 +213,39 @@ class TraySummaryTests(unittest.TestCase):
             snapshot = TRAY.fetch_usage_snapshot(config, False, reader)
         self.assertEqual(12.5, snapshot.today_cost)
         self.assertIn("Session log unavailable", snapshot.intraday.error)
+        self.assertEqual({}, snapshot.intraday_days)
+
+    def test_historical_intraday_costs_use_pricing_effective_on_each_local_day(self):
+        now = datetime(2026, 8, 3, 12)
+        history = {"snapshots": [
+            {"effectiveDate": "2026-08-01", "models": {"claude-test": {"rates": {"input": 5}}}},
+            {"effectiveDate": "2026-08-03", "models": {"claude-test": {"rates": {"input": 10}}}},
+        ]}
+        response = SimpleNamespace(returncode=0, stdout='{"daily": []}')
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "wanted"
+            project.mkdir()
+            records = [
+                {"timestamp": datetime(2026, 8, day, 10).astimezone().isoformat(),
+                 "message": {"id": str(day), "model": "claude-test", "usage": {"input_tokens": 1_000_000}}}
+                for day in (1, 2, 3)
+            ]
+            records[1]["costUSD"] = 2.0
+            (project / "session.jsonl").write_text('\n'.join(json.dumps(row) for row in records))
+            config = SimpleNamespace(pricing_history_path=Path("/unused"), project="wanted")
+            with patch.object(TRAY, "datetime") as clock, \
+                 patch.object(TRAY, "fetch_command", return_value=["fake"]), \
+                 patch.object(TRAY.subprocess, "run", return_value=response), \
+                 patch.object(TRAY, "read_pricing_history", return_value=history):
+                clock.now.return_value = now
+                clock.strptime.side_effect = datetime.strptime
+                snapshot = TRAY.fetch_usage_snapshot(config, False, ClaudeLogReader([root]))
+            self.assertEqual([5.0, 2.0, 10.0], [
+                sum(cost for _time, cost in snapshot.intraday_days[date(2026, 8, day)].costs)
+                for day in (1, 2, 3)
+            ])
+            self.assertIs(snapshot.intraday, snapshot.intraday_days[now.date()])
 
     def test_zero_cost_model_is_backfilled_before_totaling(self):
         usage = {
@@ -337,34 +375,111 @@ class TraySummaryTests(unittest.TestCase):
             self.assertEqual("", revision)
 
     def test_update_check_failure_is_silent(self):
-        tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
+        tray = self.update_tray()
         tray.checking_for_update = True
-        tray.available_update_revision = None
-        tray.update_item = Mock()
-
-        with patch.object(TRAY, "notify_update_available") as notify:
-            result = tray._finish_update_check(None)
+        result = tray._finish_update_check(None)
 
         self.assertFalse(result)
         tray.update_item.set_label.assert_not_called()
         tray.update_item.show.assert_not_called()
-        notify.assert_not_called()
+        tray.Gtk.MessageDialog.assert_not_called()
 
     def test_available_update_is_shown_and_not_repeated(self):
+        tray = self.update_tray()
+        tray._finish_update_check("abc1234", "20.0.31", "running")
+        dialog = tray.update_dialog
+        self.assertIsNotNone(dialog)
+        self.assertIn("20.0.30 → 20.0.31", dialog.format_secondary_text.call_args.args[0])
+        tray._update_response(dialog, tray.Gtk.ResponseType.CANCEL, ("abc1234", "20.0.31"))
+        tray._finish_update_check("abc1234", "20.0.31", "running")
+        tray.Gtk.MessageDialog.assert_called_once()
+        tray._apply_updates.assert_not_called()
+        tray._show_update_dialog()
+        self.assertEqual(2, tray.Gtk.MessageDialog.call_count)
+        tray._update_response(tray.update_dialog, tray.Gtk.ResponseType.OK, ("abc1234", "20.0.31"))
+        tray._apply_updates.assert_called_once_with("abc1234", "20.0.31")
+
+    def update_tray(self):
         tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
         tray.checking_for_update = True
         tray.available_update_revision = None
+        tray.available_ccusage_version = ""
+        tray.restart_revision = ""
+        tray.running_revision = "running"
+        tray.ccusage_version = "20.0.30"
+        tray.shown_updates = set()
+        tray.update_dialog = None
+        tray.applying_updates = False
+        tray.refreshing = False
+        tray.refresh_item = Mock()
         tray.update_item = Mock()
+        tray.check_updates_item = Mock()
+        tray.Gtk = Mock()
+        tray.Gtk.ResponseType = SimpleNamespace(OK=1, CANCEL=0)
+        tray._apply_updates = Mock()
+        return tray
 
-        with patch.object(TRAY, "notify_update_available") as notify:
-            tray._finish_update_check("abc1234")
-            tray._finish_update_check("abc1234")
+    def test_external_app_update_prompts_restart_and_current_versions_stay_quiet(self):
+        tray = self.update_tray()
+        tray._finish_update_check("", "20.0.30", "running")
+        tray.Gtk.MessageDialog.assert_not_called()
+        tray._finish_update_check("", "20.0.30", "new-on-disk")
+        self.assertEqual("new-on-disk", tray.restart_revision)
+        tray.update_item.set_label.assert_called_with("Restart to load app update…")
+        self.assertIn("updated on disk", tray.update_dialog.format_secondary_text.call_args.args[0])
 
-        tray.update_item.set_label.assert_called_once_with(
-            "Update available · abc1234"
-        )
-        tray.update_item.show.assert_called_once_with()
-        notify.assert_called_once_with("abc1234")
+    def test_failed_check_preserves_existing_offer_and_new_release_prompts_again(self):
+        tray = self.update_tray()
+        tray._finish_update_check("", "20.0.31", "running")
+        tray._update_response(tray.update_dialog, 0, ("", "20.0.31"))
+        tray._finish_update_check(None, None, None)
+        self.assertEqual("20.0.31", tray.available_ccusage_version)
+        tray.Gtk.MessageDialog.assert_called_once()
+        tray._finish_update_check("", "20.0.32", "running")
+        self.assertEqual(2, tray.Gtk.MessageDialog.call_count)
+
+    def test_failed_install_or_restart_leaves_the_current_tray_running(self):
+        tray = self.update_tray()
+        tray.config = Mock()
+        tray._set_status = Mock()
+        with patch.object(TRAY, "restart_tray") as restart:
+            tray._finish_apply_updates("download failed")
+            restart.assert_not_called()
+        with patch.object(TRAY, "restart_tray", side_effect=OSError("cannot execute")):
+            tray._finish_apply_updates("")
+        tray.Gtk.main_quit.assert_not_called()
+        self.assertFalse(tray.applying_updates)
+        self.assertIn("cannot execute", tray._set_status.call_args.args[0])
+
+    def test_restart_preserves_configuration_and_releases_the_old_ccusage_selection(self):
+        config = TRAY.TrayConfig(ROOT / 'ai-usage-explorer.sh', Path('/tmp/custom-prices.json'),
+                                'project with spaces', True, False, 120, 7200, None, '/old/ccusage')
+        with patch.dict(TRAY.os.environ, {"AI_USAGE_EXPLORER_CCUSAGE_BIN": "/old/ccusage"}), \
+             patch.object(TRAY.os, "execve") as execute:
+            TRAY.restart_tray(config)
+        program, args, environment = execute.call_args.args
+        self.assertEqual(str(config.script_path), program)
+        self.assertIn('--tray', args)
+        self.assertIn('--refresh', args)
+        self.assertIn('--no-pricing-update', args)
+        self.assertEqual('project with spaces', args[args.index('--project') + 1])
+        self.assertNotIn('AI_USAGE_EXPLORER_CCUSAGE_BIN', environment)
+        self.assertEqual('120', environment['AI_USAGE_EXPLORER_TRAY_REFRESH_SECONDS'])
+        self.assertEqual('7200', environment['AI_USAGE_EXPLORER_TRAY_UPDATE_SECONDS'])
+        self.assertEqual('/tmp/custom-prices.json', environment['AI_USAGE_EXPLORER_PRICING_HISTORY'])
+
+    def test_snapshot_reports_and_uses_the_active_ccusage_executable(self):
+        config = SimpleNamespace(pricing_history_path=Path('/unused'), ccusage_bin='/chosen/ccusage')
+        response = SimpleNamespace(returncode=0, stdout=json.dumps({
+            'daily': [], 'ccusagePath': '/chosen/ccusage', 'ccusageVersion': '20.0.30',
+        }))
+        with patch.object(TRAY, 'fetch_command', return_value=['fake']), \
+             patch.object(TRAY.subprocess, 'run', return_value=response) as run, \
+             patch.object(TRAY, 'read_pricing_history', return_value={}):
+            snapshot = TRAY.fetch_usage_snapshot(config, False)
+        self.assertEqual('/chosen/ccusage', snapshot.ccusage_path)
+        self.assertEqual('20.0.30', snapshot.ccusage_version)
+        self.assertEqual('/chosen/ccusage', run.call_args.kwargs['env']['AI_USAGE_EXPLORER_CCUSAGE_BIN'])
 
     def test_tray_schedules_hourly_update_checks(self):
         tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)

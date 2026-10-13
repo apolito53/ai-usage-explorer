@@ -34,6 +34,7 @@ DUMP_CLAUDE_TRAY_JSON=0
 TRAY=0
 INSTALL_TRAY_AUTOSTART=0
 REMOVE_TRAY_AUTOSTART=0
+INSTALL_CCUSAGE_VERSION=""
 NO_UPDATE="${AI_USAGE_EXPLORER_NO_UPDATE:-0}"
 NO_PRICING_UPDATE="${AI_USAGE_EXPLORER_NO_PRICING_UPDATE:-0}"
 
@@ -95,6 +96,7 @@ while [[ $# -gt 0 ]]; do
         --remove-tray-autostart) REMOVE_TRAY_AUTOSTART=1; shift ;;
         --no-update) NO_UPDATE=1; shift ;;
         --no-pricing-update) NO_PRICING_UPDATE=1; shift ;;
+        --install-ccusage) INSTALL_CCUSAGE_VERSION="$2"; shift 2 ;;
         --version) echo "AI Usage Explorer ${VERSION}"; exit 0 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -397,6 +399,9 @@ fetch_claude_tray_data() {
     AI_USAGE_SINCE="$SINCE" \
     AI_USAGE_PROJECT="$PROJECT" \
     AI_USAGE_OFFLINE="$OFFLINE" \
+    AI_USAGE_CCUSAGE_ACTION="${1:-usage}" \
+    AI_USAGE_CCUSAGE_VERSION="${2:-}" \
+    AI_USAGE_UPDATES_MODULE="${SCRIPT_DIR}/ai_usage_updates.py" \
     bash -lic '
         for candidate in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
             if [ -d "$candidate" ]; then
@@ -414,40 +419,11 @@ fetch_claude_tray_data() {
             exit 1
         fi
 
-        # Prefer an already-installed or pnpm-cached ccusage binary. A one-minute
-        # tray poll should not ask the package registry the same question forever.
-        ccusage_bin="$(command -v ccusage 2>/dev/null || true)"
-        if [ -z "$ccusage_bin" ]; then
-            cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/pnpm/dlx"
-            if [ -d "$cache_root" ]; then
-                if find "$cache_root" -maxdepth 0 -printf "" >/dev/null 2>&1; then
-                    ccusage_bin="$(
-                        find "$cache_root" -path "*/node_modules/.bin/ccusage" -type f -perm -u+x -printf "%T@ %p\n" 2>/dev/null \
-                            | sort -nr \
-                            | sed -n "1{s/^[^ ]* //;p;}"
-                    )"
-                else
-                    ccusage_bin="$(
-                        find "$cache_root" -path "*/node_modules/.bin/ccusage" -type f -print 2>/dev/null \
-                            | sed -n "1p"
-                    )"
-                fi
-                if [ -n "$ccusage_bin" ] && [ ! -x "$ccusage_bin" ]; then
-                    ccusage_bin=""
-                fi
-            fi
+        if [ "$AI_USAGE_CCUSAGE_ACTION" = "install" ]; then
+            exec python3 "$AI_USAGE_UPDATES_MODULE" install "$AI_USAGE_CCUSAGE_VERSION"
         fi
-
-        run_package_ccusage() {
-            if command -v pnpm >/dev/null 2>&1; then
-                pnpm dlx ccusage "$@"
-            elif command -v npx >/dev/null 2>&1; then
-                npx --yes ccusage@latest "$@"
-            else
-                echo "ERROR: Install ccusage, pnpm, or npm/npx to load usage data." >&2
-                return 1
-            fi
-        }
+        ccusage_bin="$(python3 "$AI_USAGE_UPDATES_MODULE" ensure)" || exit 1
+        ccusage_version="$(python3 "$AI_USAGE_UPDATES_MODULE" version "$ccusage_bin")"
 
         run_ccusage() {
             period="$1"
@@ -459,19 +435,16 @@ fetch_claude_tray_data() {
             if [ "$AI_USAGE_OFFLINE" -eq 1 ]; then
                 args+=(--offline)
             fi
-            if [ -n "$ccusage_bin" ] && "$ccusage_bin" "${args[@]}" > "$output_file"; then
-                return
-            fi
-            run_package_ccusage "${args[@]}" > "$output_file"
+            "$ccusage_bin" "${args[@]}" > "$output_file"
         }
 
         daily_file="$(mktemp)"
         monthly_file="$(mktemp)"
         trap "rm -f \"$daily_file\" \"$monthly_file\"" EXIT
-        run_ccusage daily "$daily_file"
-        run_ccusage monthly "$monthly_file"
+        run_ccusage daily "$daily_file" || exit 1
+        run_ccusage monthly "$monthly_file" || exit 1
 
-        python3 - "$daily_file" "$monthly_file" <<PY
+        python3 - "$daily_file" "$monthly_file" "$ccusage_bin" "$ccusage_version" <<PY
 import json
 import sys
 
@@ -489,6 +462,8 @@ json.dump(
     {
         "daily": section(sys.argv[1], "daily"),
         "monthly": section(sys.argv[2], "monthly"),
+        "ccusagePath": sys.argv[3],
+        "ccusageVersion": sys.argv[4],
     },
     sys.stdout,
 )
@@ -734,6 +709,11 @@ finally:
         os.unlink(tmp_path)
 PY
 }
+
+if [ -n "$INSTALL_CCUSAGE_VERSION" ]; then
+    fetch_claude_tray_data install "$INSTALL_CCUSAGE_VERSION"
+    exit $?
+fi
 
 if [ "$INSTALL_TRAY_AUTOSTART" -eq 1 ]; then
     manage_tray_autostart install

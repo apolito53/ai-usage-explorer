@@ -10,8 +10,9 @@ editing so changes land on the correct side of that boundary.
 | --- | --- |
 | `ai-usage-explorer.sh` | CLI parsing, self-update, dependency setup, `ccusage` invocation, provider normalization, pricing snapshots, and the embedded Rich terminal UI |
 | `ai-usage-tray.py` | Shared Claude tray core plus the Ubuntu GTK/AppIndicator frontend |
-| `ai_usage_chart.py` | Ubuntu monthly and intraday chart window; loads GTK/Cairo lazily |
+| `ai_usage_chart.py` | Ubuntu monthly and intraday chart window with daily-bar drill-down; loads GTK/Cairo lazily |
 | `ai_usage_intraday.py` | Read-only Claude log reader, duplicate handling, in-memory file reuse, and local-time interval grouping |
+| `ai_usage_updates.py` | `ccusage` version detection, executable selection, registry checks, and verified version installation |
 | `macos/ai-usage-macos.py` | macOS AppKit menu-bar frontend; imports the shared tray core |
 | `macos/install.sh` | macOS dependency preflight and per-user LaunchAgent installation |
 | `macos/uninstall.sh` | Removes the macOS LaunchAgent and private Python environment |
@@ -47,7 +48,10 @@ The shell has two internal JSON modes:
 - `--dump-json` emits normalized Claude and Codex daily/monthly data for a UI
   refresh.
 - `--dump-claude-tray-json` emits the smaller Claude-only payload used by both
-  desktop companions.
+  desktop companions, including its `ccusage` executable and version.
+
+The internal `--install-ccusage VERSION` mode installs an exact release using
+the same Node environment as the tray's usage polls.
 
 They are implementation entry points, not part of the normal user-facing CLI.
 
@@ -74,8 +78,9 @@ for it.
 | Historical rates or zero-cost repair | `tests/test_pricing.py` |
 | Provider/model filtering | `tests/test_model_filter.py` |
 | Claude totals, update polling, Ubuntu autostart, AppIndicator fallback | `tests/test_tray.py` |
-| Chart series, axis scaling, daily/cumulative views | `tests/test_chart.py` |
-| Timestamped records, duplicates, cache invalidation, intervals and timezones | `tests/test_intraday.py` |
+| `ccusage` versions, installs, executable selection, safe Git updates | `tests/test_updates.py` |
+| Chart series, axis scaling, daily/cumulative views, historical-day navigation | `tests/test_chart.py` |
+| Timestamped records, duplicates, cache invalidation, full-day intervals and timezones | `tests/test_intraday.py` |
 | macOS argument/escaping/platform behavior | `tests/test_macos.py` |
 
 The terminal tests extract selected functions and classes from the embedded

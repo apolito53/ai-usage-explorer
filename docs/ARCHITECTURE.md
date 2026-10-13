@@ -108,15 +108,21 @@ installed but the optional GI typelib is not.
 Its Usage graphs action lazily opens `ai_usage_chart.py`, a GTK/Cairo window
 with spending bars and cumulative area charts. `fetch_usage_snapshot` retains the daily
 series after pricing backfill so chart updates and panel totals share one poll.
+Monthly daily bars with timestamped details use a darker color and open a dated
+intraday tab; a legend identifies bars that have only an aggregate daily total.
 The existing `fetch_usage` tuple interface remains available to macOS.
 
 The Ubuntu poll also uses `ai_usage_intraday.py` to read timestamped Claude
 JSONL usage into memory. Unchanged files reuse parsed usage metadata; file
 replacement, truncation, and deletion invalidate it. Conversation content is
-discarded during parsing. The Today tab groups usage into 60-, 30-, 15-, 5-, or
+discarded during parsing. Each snapshot includes timestamped costs grouped by
+local day for the current month, priced using each day's effective pricing
+snapshot. Today and historical day tabs group usage into 60-, 30-, 15-, 5-, or
 1-minute intervals without changing polling or persisting new usage history.
 Grouping starts at local midnight and uses elapsed time, preserving repeated
-hours across daylight-saving changes. Local log failures affect only Today.
+hours across daylight-saving changes. Historical days end at the next midnight;
+Today stops at refresh time. Local log failures affect day details and their
+availability indicators while aggregate totals continue to refresh.
 
 The macOS frontend dynamically imports the same module and supplies AppKit menu
 items, timers, Terminal launching, and AppleScript notifications. Cocoa imports
@@ -137,8 +143,24 @@ All other cases are skipped or reported without rewriting local work.
 Desktop companions refresh usage once per minute by default. Their child dump
 commands include `--no-update`, preventing each data poll from fetching Git.
 Instead, a separate hourly background check detects a fast-forward update.
-Failures and current versions stay silent; a newly available revision appears
-in the menu and triggers one notification.
+Failures and current versions stay silent. macOS shows a menu item and one
+notification for each new app revision.
+
+Ubuntu also checks the npm registry for a newer stable `ccusage` release, after
+its first successful poll and on the hourly timer. Each new version opens an
+update/restart prompt once per session; the menu keeps an action to reopen it.
+Accepting prepares exact requested versions in a worker, then replaces the tray
+process through its launcher. Dirty or diverged app checkouts are preserved,
+and preparation failures leave the current tray alive. A changed local Git HEAD
+also prompts a restart, even when the checkout already matches upstream.
+
+`ai_usage_updates.py` owns stable version comparisons, registry metadata,
+executable resolution, and explicit version installation. The shared tray dump
+includes the selected executable and version; Ubuntu pins that executable for
+subsequent polls so newly cached packages cannot silently replace it. Installs
+use a separate version directory and atomically change the `current` symlink
+only after verification. Registry checks never install packages. The initial
+poll can bootstrap an installation if no existing executable is available.
 
 Terminal and desktop data refreshes run outside their UI loops. Results return
 through a queue (terminal), GLib idle callbacks (Ubuntu), or AppHelper callbacks
@@ -150,6 +172,8 @@ through a queue (terminal), GLib idle callbacks (Ubuntu), or AppHelper callbacks
   `ccusage`.
 - Pricing snapshots are stored in `.ai-usage-pricing-history.json`.
 - Terminal dependencies live in `.venv/`.
+- Tray-managed `ccusage` releases live in the user's XDG cache beneath
+  `ai-usage-explorer/ccusage`.
 - Ubuntu login integration is one XDG autostart desktop file.
 - macOS login integration is one LaunchAgent plus a private Cocoa environment.
 

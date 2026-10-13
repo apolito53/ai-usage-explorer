@@ -6,7 +6,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -148,6 +148,10 @@ class ClaudeLogReader:
         return tuple(events)
 
     def load(self, now, project, price_event):
+        return self.load_days(now, project, price_event).get(now.astimezone().date(), IntradayUsage())
+
+    def load_days(self, now, project, price_event):
+        """Price timestamped usage by local day for the current month."""
         roots = self.roots if self.roots is not None else claude_log_roots()
         files, events = {}, []
         for root in roots:
@@ -163,33 +167,42 @@ class ClaudeLogReader:
                 events.extend(cached[1])
         self._files = files
         current = now.astimezone()
-        costs, unpriced = [], 0
+        costs, unpriced = {}, {}
         for event in deduplicate_events(events):
-            local = event.timestamp.astimezone()
-            if local.date() != current.date() or event.timestamp > current:
+            day = event.timestamp.astimezone().date()
+            if (day.year, day.month) != (current.year, current.month) or event.timestamp > current:
                 continue
+            costs.setdefault(day, [])
             cost = price_event(event)
             if cost is None or not math.isfinite(cost) or cost < 0:
-                unpriced += 1
+                unpriced[day] = unpriced.get(day, 0) + 1
             else:
-                costs.append((event.timestamp, cost))
-        return IntradayUsage(tuple(sorted(costs)), unpriced)
+                costs[day].append((event.timestamp, cost))
+        return {
+            day: IntradayUsage(tuple(sorted(records)), unpriced.get(day, 0))
+            for day, records in costs.items()
+        }
 
 
-def bucket_costs(costs, now, minutes):
-    """Local-day buckets through now; elapsed time keeps DST repeats distinct."""
+def bucket_costs(costs, now, minutes, day=None):
+    """Local-day buckets, stopping at now for today or midnight for past days."""
     if minutes not in INTERVAL_MINUTES:
         raise ValueError("Unsupported chart interval")
     # Resolve local midnight separately: its UTC offset can differ from now.
     local = now.astimezone()
-    midnight = datetime.combine(local.date(), datetime.min.time()).astimezone()
+    day = day or local.date()
+    if day > local.date():
+        return ()
+    midnight = datetime.combine(day, datetime.min.time()).astimezone()
     start = midnight.timestamp()
+    end = datetime.combine(day + timedelta(days=1), datetime.min.time()).astimezone().timestamp()
     step = minutes * 60
-    count = int((local.timestamp() - start) // step) + 1
+    count = (int((local.timestamp() - start) // step) + 1 if day == local.date()
+             else math.ceil((end - start) / step))
     totals = [0.0] * count
     for timestamp, cost in costs:
         offset = timestamp.timestamp() - start
-        if 0 <= offset <= local.timestamp() - start:
+        if 0 <= offset < end - start and timestamp.timestamp() <= local.timestamp():
             totals[int(offset // step)] += cost
     return tuple(
         (datetime.fromtimestamp(start + index * step, timezone.utc).astimezone(), cost)

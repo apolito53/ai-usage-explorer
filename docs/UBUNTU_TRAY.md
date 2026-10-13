@@ -46,12 +46,20 @@ current interval is labeled as incomplete, and future
 intervals are not plotted. Times follow your computer's local timezone.
 Escape or closing the window hides it while the tray keeps running.
 
-The Today chart reads timestamped usage already present in Claude's local
-session logs, including usage before the tray started. It handles streaming
-duplicates, copied messages, and nested subagent progress records. It estimates
-costs using the existing pricing history when a record has no cost. If pricing
-is missing or the timestamped total differs from the tray total, the chart
-shows a note rather than silently adjusting the data.
+In **This month → Daily spending**, darker bars have timestamped day details.
+Click one (or select it with Left/Right and press Enter) to open that date with
+the same interval and cumulative controls as Today. Past dates cover the full
+local day; clicking today's bar opens Today. **← This month** returns to the
+selected bar. Lighter bars show daily totals only, and a legend below the month
+chart explains both colors. A day can have partial timestamped history; any
+difference from its daily total is shown below the detail chart.
+
+The day charts read timestamped usage already present in Claude's local
+session logs, including usage before the tray started. They handle streaming
+duplicates, copied messages, and nested subagent progress records. They estimate
+costs using the pricing history effective on each usage date when a record has
+no cost. If pricing is missing or the timestamped total differs from the daily
+total, the chart shows a note rather than silently adjusting the data.
 
 Log locations follow `CLAUDE_CONFIG_DIR` (comma-separated directories), or
 `${XDG_CONFIG_HOME:-~/.config}/claude/projects` and `~/.claude/projects` by
@@ -62,7 +70,7 @@ the polling interval when you switch chart intervals.
 The chart shares the tray's project filter, pricing fallback, and one-minute
 refresh. Refresh failures keep the last successful chart visible with an error
 and its original timestamp. A failure to read local session logs is reported
-on the Today tab without preventing the tray totals from refreshing.
+in the day charts without preventing the tray totals from refreshing.
 Ubuntu's AppIndicator menu transports standard menu
 items rather than custom drawing widgets, so the graph opens in its own window.
 
@@ -92,10 +100,29 @@ dependency check before starting the indicator.
 
 ## Polling and updates
 
-Usage refreshes every 60 seconds. While running, a separate timer checks the Git
-upstream every hour. Current versions and failed checks are silent. A newly
-available fast-forward revision appears once in the menu and produces one
-desktop notification; it is not installed automatically during a data poll.
+Usage refreshes every 60 seconds. After the first successful refresh and then
+every hour, the tray checks its Git upstream for app updates and the npm registry
+for a newer stable `ccusage` release. **Check for updates** runs the same check
+from the menu. Current versions and failed checks stay silent.
+
+A newly available version opens a prompt with **Later** and **Update and
+restart**. Choosing Later keeps the current version running; the prompt appears
+only once per version during that session, and **Update and restart…** stays in
+the menu. If the app checkout was updated externally, the prompt offers a restart
+to load it.
+
+Update checks only fetch Git and package metadata. Accepting the prompt installs
+the specific `ccusage` release, verifies its version, applies any app update, and
+restarts the tray. App updates require a clean checkout and a fast-forward;
+local changes are preserved. Download or preparation failures leave the current
+tray running and show an error that can be retried from the menu.
+
+The Ubuntu tray keeps using its selected `ccusage` executable until restart.
+Accepted releases are installed under
+`${XDG_CACHE_HOME:-~/.cache}/ai-usage-explorer/ccusage`, with the active selection
+changed only after verification. An existing installed or cached executable is
+reused initially; if none exists, the launcher downloads `ccusage` to bootstrap
+the first usage poll.
 
 Intervals can be changed with:
 

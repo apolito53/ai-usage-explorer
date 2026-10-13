@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -255,6 +255,9 @@ class UsageSnapshot:
     refreshed_at: datetime
     daily_costs: Tuple[Tuple[date, float], ...]
     intraday: object = None
+    intraday_days: Dict = field(default_factory=dict)
+    ccusage_path: str = ""
+    ccusage_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -267,6 +270,7 @@ class TrayConfig:
     refresh_seconds: int
     update_check_seconds: int
     autostart_action: Optional[str]
+    ccusage_bin: str = ""
 
 
 def desktop_exec_arg(value: str) -> str:
@@ -411,6 +415,8 @@ def fetch_usage_snapshot(config: TrayConfig, refresh_pricing: bool, log_reader=N
         capture_output=True,
         text=True,
         timeout=FETCH_TIMEOUT_SECONDS,
+        env=({**os.environ, "AI_USAGE_EXPLORER_CCUSAGE_BIN": config.ccusage_bin}
+             if getattr(config, "ccusage_bin", "") else None),
     )
     if result.returncode != 0:
         stderr_lines = [
@@ -430,18 +436,22 @@ def fetch_usage_snapshot(config: TrayConfig, refresh_pricing: bool, log_reader=N
     history = read_pricing_history(config.pricing_history_path)
     backfill_missing_costs(data, history)
     intraday = None
+    intraday_days = {}
     if log_reader is not None:
         from ai_usage_intraday import IntradayUsage
 
-        snapshot = pricing_snapshot_for_date(history, now.date().isoformat())
+        pricing_by_day = {}
 
         def price_event(event):
             if event.recorded_cost is not None and event.recorded_cost > 0:
                 return event.recorded_cost
             if not any(event.tokens):
                 return 0.0
+            day = event.timestamp.astimezone().date().isoformat()
+            if day not in pricing_by_day:
+                pricing_by_day[day] = pricing_snapshot_for_date(history, day)
             model = event.model + ("-fast" if event.fast else "")
-            record = model_pricing_record(snapshot, model)
+            record = model_pricing_record(pricing_by_day[day], model)
             item = dict(zip(
                 ("inputTokens", "outputTokens", "cacheCreationTokens", "cacheReadTokens"),
                 event.tokens,
@@ -449,12 +459,14 @@ def fetch_usage_snapshot(config: TrayConfig, refresh_pricing: bool, log_reader=N
             return estimated_model_cost(item, record)
 
         try:
-            intraday = log_reader.load(now, config.project, price_event)
+            intraday_days = log_reader.load_days(now, config.project, price_event)
+            intraday = intraday_days.get(now.date(), IntradayUsage())
         except OSError as exc:
-            intraday = IntradayUsage(error=f"Could not read today's usage: {exc}")
+            intraday = IntradayUsage(error=f"Could not read timestamped usage: {exc}")
     return UsageSnapshot(
         claude_month_cost(data, now), claude_today_cost(data, now), now,
-        claude_daily_costs(data, now), intraday,
+        claude_daily_costs(data, now), intraday, intraday_days,
+        data.get("ccusagePath", ""), data.get("ccusageVersion", ""),
     )
 
 
@@ -509,23 +521,50 @@ def available_update_revision(script_path: Path) -> Optional[str]:
     return git_output(repo_path, "rev-parse", "--short", "@{u}")
 
 
-def notify_update_available(revision: str) -> None:
-    notifier = shutil.which("notify-send")
-    if not notifier:
-        return
-    try:
-        subprocess.Popen(
-            [
-                notifier,
-                "AI Usage Explorer update available",
-                f"Revision {revision} is ready. Restart the tray to install it.",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError:
-        pass
+def prepare_updates(script_path: Path, revision: str, ccusage_version: str):
+    """Prepare requested updates while the existing tray continues running."""
+    repo = script_path.resolve().parent
+    if revision:
+        root = git_output(repo, "rev-parse", "--show-toplevel")
+        if root is None or Path(root).resolve() != repo:
+            raise RuntimeError("The app checkout could not be verified")
+        if git_output(repo, "diff", "--quiet") is None or git_output(repo, "diff", "--cached", "--quiet") is None:
+            raise RuntimeError("The app has local changes. Commit or stash them before updating.")
+        if git_output(repo, "merge-base", "--is-ancestor", "HEAD", revision) is None:
+            raise RuntimeError("The app update is no longer a fast-forward; update the checkout manually.")
+    if ccusage_version:
+        from ai_usage_updates import INSTALL_TIMEOUT_SECONDS
+
+        try:
+            result = subprocess.run(
+                [str(script_path), "--install-ccusage", ccusage_version],
+                check=False, capture_output=True, text=True, timeout=INSTALL_TIMEOUT_SECONDS + 45,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("The ccusage update timed out") from exc
+        if result.returncode != 0:
+            lines = [line for line in result.stderr.splitlines() if line.strip() and line.strip() != "logout"]
+            raise RuntimeError(lines[-1] if lines else "The ccusage update failed")
+    if revision and git_output(repo, "merge", "--ff-only", revision) is None:
+        raise RuntimeError("The app update could not be applied; the current tray is still running")
+
+
+def restart_tray(config: TrayConfig):
+    args = [str(config.script_path), "--tray", "--no-update"]
+    if config.project:
+        args.extend(["--project", config.project])
+    if config.online:
+        args.append("--refresh")
+    if not config.refresh_pricing:
+        args.append("--no-pricing-update")
+    environment = dict(os.environ)
+    environment.pop("AI_USAGE_EXPLORER_CCUSAGE_BIN", None)
+    environment.update({
+        "AI_USAGE_EXPLORER_PRICING_HISTORY": str(config.pricing_history_path),
+        "AI_USAGE_EXPLORER_TRAY_REFRESH_SECONDS": str(config.refresh_seconds),
+        "AI_USAGE_EXPLORER_TRAY_UPDATE_SECONDS": str(config.update_check_seconds),
+    })
+    os.execve(str(config.script_path), args, environment)
 
 
 def _gobject_pointer(value) -> int:
@@ -683,6 +722,14 @@ class ClaudeUsageTray:
         self.refreshing = False
         self.checking_for_update = False
         self.available_update_revision: Optional[str] = None
+        self.available_ccusage_version = ""
+        self.restart_revision = ""
+        self.running_revision = git_output(config.script_path.resolve().parent, "rev-parse", "HEAD")
+        self.ccusage_version = ""
+        self.has_checked_updates = False
+        self.applying_updates = False
+        self.update_dialog = None
+        self.shown_updates = set()
         self.has_refreshed_pricing = not config.refresh_pricing
         self.display_period = DEFAULT_DISPLAY_PERIOD
         self.month_cost: Optional[float] = None
@@ -718,7 +765,8 @@ class ClaudeUsageTray:
         self.today_total_item = self._disabled_item("Today: …")
         self.updated_item = self._disabled_item("Not refreshed yet")
         self.status_item = self._disabled_item("")
-        self.update_item = self._disabled_item("")
+        self.update_item = self.Gtk.MenuItem(label="")
+        self.update_item.connect("activate", self._show_update_dialog)
         for item in (
             self.month_item,
             self.month_total_item,
@@ -753,6 +801,10 @@ class ClaudeUsageTray:
         self.refresh_item = self.Gtk.MenuItem(label="Refresh now")
         self.refresh_item.connect("activate", self.refresh)
         menu.append(self.refresh_item)
+
+        self.check_updates_item = self.Gtk.MenuItem(label="Check for updates")
+        self.check_updates_item.connect("activate", self.check_for_updates)
+        menu.append(self.check_updates_item)
 
         open_item = self.Gtk.MenuItem(label="Open AI Usage Explorer")
         open_item.connect("activate", self.open_explorer)
@@ -815,29 +867,124 @@ class ClaudeUsageTray:
         self.check_for_updates()
         return True
 
-    def check_for_updates(self):
-        if self.checking_for_update:
+    def check_for_updates(self, _item=None):
+        if self.checking_for_update or self.applying_updates:
             return
         self.checking_for_update = True
+        self.check_updates_item.set_sensitive(False)
 
         def worker():
+            from ai_usage_updates import latest_ccusage_version
+
             revision = available_update_revision(self.config.script_path)
-            self.GLib.idle_add(self._finish_update_check, revision)
+            latest = latest_ccusage_version()
+            disk_revision = git_output(self.config.script_path.resolve().parent, "rev-parse", "HEAD")
+            self.GLib.idle_add(self._finish_update_check, revision, latest, disk_revision)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_update_check(self, revision: Optional[str]):
+    def _finish_update_check(self, revision: Optional[str], latest=None, disk_revision=None):
+        from ai_usage_updates import newer_version
+
         self.checking_for_update = False
-        if not revision or revision == self.available_update_revision:
-            return False
-        self.available_update_revision = revision
-        self.update_item.set_label(f"Update available · {revision}")
-        self.update_item.show()
-        notify_update_available(revision)
+        self.check_updates_item.set_sensitive(True)
+        if revision is not None:
+            self.available_update_revision = revision
+        if latest is not None:
+            self.available_ccusage_version = latest if newer_version(latest, self.ccusage_version) else ""
+        if disk_revision is not None and self.running_revision is not None:
+            self.restart_revision = disk_revision if disk_revision != self.running_revision else ""
+        updates = self._update_keys()
+        if updates:
+            self.update_item.set_label("Update and restart…" if self.available_update_revision or self.available_ccusage_version
+                                       else "Restart to load app update…")
+            self.update_item.show()
+            if updates - self.shown_updates:
+                self._show_update_dialog()
+        else:
+            self.update_item.hide()
+        return False
+
+    def _update_keys(self):
+        return {(kind, version) for kind, version in (
+            ("app", self.available_update_revision), ("ccusage", self.available_ccusage_version),
+            ("restart", self.restart_revision),
+        ) if version}
+
+    def _show_update_dialog(self, _item=None):
+        if self.update_dialog is not None or self.applying_updates or not self._update_keys():
+            return
+        details = []
+        if self.available_update_revision:
+            details.append(f"AI Usage Explorer · {self.available_update_revision}")
+        elif self.restart_revision:
+            details.append("AI Usage Explorer has been updated on disk.")
+        if self.available_ccusage_version:
+            details.append(f"ccusage · {self.ccusage_version} → {self.available_ccusage_version}")
+        needs_install = bool(self.available_update_revision or self.available_ccusage_version)
+        details.append("\nThe tray will restart when the updates are ready." if needs_install
+                       else "\nRestart the tray to load the updated app.")
+        gtk = self.Gtk
+        dialog = gtk.MessageDialog(message_type=gtk.MessageType.INFO, buttons=gtk.ButtonsType.NONE,
+                                   text="Updates available")
+        dialog.set_title("AI Usage Explorer")
+        dialog.format_secondary_text("\n".join(details))
+        dialog.add_button("Later", gtk.ResponseType.CANCEL)
+        dialog.add_button("Update and restart" if needs_install else "Restart now", gtk.ResponseType.OK)
+        dialog.set_default_response(gtk.ResponseType.CANCEL)
+        targets = (self.available_update_revision or "", self.available_ccusage_version)
+        dialog.connect("response", self._update_response, targets)
+        self.update_dialog = dialog
+        self.shown_updates.update(self._update_keys())
+        dialog.show_all()
+        dialog.present()
+
+    def _update_response(self, dialog, response, targets):
+        dialog.destroy()
+        self.update_dialog = None
+        if response == self.Gtk.ResponseType.OK:
+            self._apply_updates(*targets)
+
+    def _apply_updates(self, revision, ccusage_version):
+        if self.applying_updates:
+            return
+        self.applying_updates = True
+        self.update_item.set_sensitive(False)
+        self.check_updates_item.set_sensitive(False)
+        self.refresh_item.set_sensitive(False)
+        self._set_status("Preparing updates…")
+
+        def worker():
+            try:
+                prepare_updates(self.config.script_path, revision, ccusage_version)
+            except Exception as exc:
+                self.GLib.idle_add(self._finish_apply_updates, str(exc))
+            else:
+                self.GLib.idle_add(self._finish_apply_updates, "")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_apply_updates(self, error):
+        if not error:
+            try:
+                restart_tray(self.config)
+            except OSError as exc:
+                error = f"Could not restart the tray: {exc}"
+        self.applying_updates = False
+        self.update_item.set_sensitive(True)
+        self.check_updates_item.set_sensitive(True)
+        self.refresh_item.set_sensitive(not self.refreshing)
+        if error:
+            self._set_status("Update failed: " + " ".join(error.split())[:120])
+            dialog = self.Gtk.MessageDialog(message_type=self.Gtk.MessageType.ERROR,
+                                           buttons=self.Gtk.ButtonsType.CLOSE, text="Update could not be applied")
+            dialog.format_secondary_text(error + "\n\nThe current tray is still running. You can retry from the menu.")
+            dialog.connect("response", lambda window, _response: window.destroy())
+            dialog.show_all()
         return False
 
     def refresh(self, _item=None):
-        if self.refreshing:
+        if self.refreshing or self.applying_updates:
             return
         self.refreshing = True
         self.refresh_item.set_sensitive(False)
@@ -862,6 +1009,10 @@ class ClaudeUsageTray:
         snapshot: UsageSnapshot,
     ):
         self.snapshot = snapshot
+        if snapshot.ccusage_path and not self.config.ccusage_bin:
+            self.config = replace(self.config, ccusage_bin=snapshot.ccusage_path)
+        if snapshot.ccusage_version:
+            self.ccusage_version = snapshot.ccusage_version
         month_cost, today_cost, refreshed_at = (
             snapshot.month_cost, snapshot.today_cost, snapshot.refreshed_at,
         )
@@ -877,19 +1028,24 @@ class ClaudeUsageTray:
         self.updated_item.set_label("Updated " + refreshed_at.strftime("%-I:%M %p"))
         if self.graph_window is not None:
             self.graph_window.set_usage(snapshot)
-        self._set_status("")
+        if not self.applying_updates:
+            self._set_status("")
         self._finish_refresh()
+        if not self.has_checked_updates:
+            self.has_checked_updates = True
+            self.check_for_updates()
         return False
 
     def _finish_error(self, message: str):
         one_line = " ".join(message.split())
-        self._set_status("Refresh failed: " + one_line[:100])
+        if not self.applying_updates:
+            self._set_status("Refresh failed: " + one_line[:100])
         self._finish_refresh()
         return False
 
     def _finish_refresh(self):
         self.refreshing = False
-        self.refresh_item.set_sensitive(True)
+        self.refresh_item.set_sensitive(not self.applying_updates)
         if self.graph_window is not None:
             self.graph_window.set_status(self.status_message, False)
 

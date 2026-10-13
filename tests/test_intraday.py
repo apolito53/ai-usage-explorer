@@ -5,7 +5,7 @@ import tempfile
 import time
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 from ai_usage_intraday import (
@@ -103,6 +103,46 @@ class IntradayTests(unittest.TestCase):
         with local_timezone("America/New_York"):
             buckets = bucket_costs((), datetime(2026, 3, 8, 7, 5, tzinfo=timezone.utc), 60)
             self.assertEqual([0, 1, 3], [stamp.hour for stamp, _cost in buckets])
+
+    def test_historical_days_cover_full_day_at_every_interval_including_dst(self):
+        with local_timezone("America/New_York"):
+            for day, hours in ((date(2026, 10, 9), 24), (date(2026, 3, 8), 23), (date(2026, 11, 1), 25)):
+                start = datetime.combine(day, datetime.min.time()).astimezone()
+                end = datetime.combine(day + timedelta(days=1), datetime.min.time()).astimezone()
+                costs = ((start, 1), (end - timedelta(seconds=1), 2), (end, 100))
+                for minutes in INTERVAL_MINUTES:
+                    with self.subTest(day=day, minutes=minutes):
+                        buckets = bucket_costs(costs, end, minutes, day)
+                        self.assertEqual(hours * 60 // minutes, len(buckets))
+                        self.assertEqual(3, sum(cost for _time, cost in buckets))
+                        self.assertEqual(1, buckets[0][1])
+                        self.assertEqual(2, buckets[-1][1])
+                        self.assertTrue(all(stamp.date() == day for stamp, _cost in buckets))
+            self.assertEqual((), bucket_costs((), datetime(2026, 10, 9), 60, date(2026, 10, 10)))
+
+    def test_reader_groups_available_local_days_and_keeps_unpriced_counts_separate(self):
+        with tempfile.TemporaryDirectory() as temp_dir, local_timezone("America/New_York"):
+            root = Path(temp_dir)
+            for project in ("wanted", "unwanted"):
+                (root / project).mkdir()
+                (root / project / "session.jsonl").write_text('\n'.join(json.dumps(row) for row in (
+                    record(timestamp="2026-10-01T03:59:00Z", message_id=project + "lastmonth"),
+                    record(timestamp="2026-10-01T04:00:00Z", message_id=project + "first", tokens=100),
+                    record(timestamp="2026-10-09T03:59:00Z", message_id=project + "yesterday", tokens=200),
+                    record(timestamp="2026-10-09T04:00:00Z", message_id=project + "today", tokens=300),
+                    record(timestamp="2026-10-09T05:00:00Z", message_id=project + "unknown", tokens=400),
+                    record(timestamp="2026-10-10T02:00:00Z", message_id=project + "future"),
+                )))
+            reader = ClaudeLogReader([root])
+            now = datetime(2026, 10, 9, 20)
+            price = lambda event: event.tokens[0] / 100 if event.tokens[0] < 400 else None
+            days = reader.load_days(now, "wanted", price)
+            self.assertEqual({date(2026, 10, day) for day in (1, 8, 9)}, set(days))
+            self.assertEqual([1, 2, 3], [sum(cost for _time, cost in days[day].costs) for day in sorted(days)])
+            self.assertEqual([0, 0, 1], [days[day].unpriced for day in sorted(days)])
+            # Cached historical files still provide details without another read.
+            with patch.object(reader, "_read_file", side_effect=AssertionError("reread")):
+                self.assertEqual(days, reader.load_days(now, "wanted", price))
 
     def test_reader_reuses_unchanged_files_and_handles_append_truncation_and_removal(self):
         with tempfile.TemporaryDirectory() as temp_dir, local_timezone("UTC"):

@@ -20,7 +20,7 @@ Run the checks appropriate to every code change:
 
 ```bash
 bash -n ai-usage-explorer.sh macos/install.sh macos/uninstall.sh
-python3 -m py_compile ai-usage-tray.py ai_usage_chart.py ai_usage_intraday.py macos/ai-usage-macos.py
+python3 -m py_compile ai-usage-tray.py ai_usage_chart.py ai_usage_intraday.py ai_usage_updates.py macos/ai-usage-macos.py
 python3 -m unittest discover -s tests -v
 git diff --check
 ```
@@ -69,9 +69,10 @@ collapse these states to a single set.
 
 ### Keep polling out of data refresh
 
-Desktop usage polls invoke the shell with `--no-update`. Git polling has its own
-timer and must remain silent for current versions and errors. Only a newly
-available revision belongs in the menu or notification stream.
+Desktop usage polls invoke the shell with `--no-update`. Git and registry polling
+have their own timer and must remain silent for current versions and errors.
+Ubuntu prompts once per new version per session and installs only after the user
+accepts. Keep the active `ccusage` executable pinned across usage polls.
 
 ### Preserve safe update behavior
 
@@ -87,6 +88,8 @@ any guard.
 - `test_model_filter.py` extracts terminal filter functions/classes with `ast`.
 - `test_tray.py` imports the tray module directly and fakes GTK/native/update
   boundaries.
+- `test_updates.py` covers version detection, executable selection, installation
+  failure/activation, and Git update guards using temporary repositories.
 - `test_macos.py` imports the macOS adapter without Cocoa and tests portable
   configuration and escaping.
 
