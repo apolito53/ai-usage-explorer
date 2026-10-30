@@ -32,6 +32,7 @@ GROUP="day"
 DUMP_JSON=0
 DUMP_CLAUDE_TRAY_JSON=0
 TRAY=0
+FOREGROUND=0
 INSTALL_TRAY_AUTOSTART=0
 REMOVE_TRAY_AUTOSTART=0
 INSTALL_CCUSAGE_VERSION=""
@@ -50,7 +51,8 @@ Options:
   --refresh            Fetch current model pricing instead of ccusage --offline
   --demo               Load bundled demo data instead of running ccusage
   --file PATH          Load an existing ccusage JSON file
-  --tray               Show selectable Claude usage in the Ubuntu tray
+  --tray               Show Claude usage in the Ubuntu tray in the background
+  --foreground         Keep --tray attached to the terminal for debugging
   --install-tray-autostart
                        Launch the tray automatically after Ubuntu login
   --remove-tray-autostart
@@ -92,6 +94,7 @@ while [[ $# -gt 0 ]]; do
         --demo) JSON_FILE="${SCRIPT_DIR}/demo/usage-demo.json"; shift ;;
         --file) JSON_FILE="$2"; shift 2 ;;
         --tray) TRAY=1; shift ;;
+        --foreground) FOREGROUND=1; shift ;;
         --install-tray-autostart) INSTALL_TRAY_AUTOSTART=1; shift ;;
         --remove-tray-autostart) REMOVE_TRAY_AUTOSTART=1; shift ;;
         --no-update) NO_UPDATE=1; shift ;;
@@ -102,6 +105,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
 done
+
+if [ "$FOREGROUND" -eq 1 ] && [ "$TRAY" -ne 1 ]; then
+    echo "ERROR: --foreground requires --tray" >&2
+    exit 1
+fi
 
 case "$GROUP" in
     day|month) ;;
@@ -499,7 +507,41 @@ run_tray() {
     if [ "$NO_PRICING_UPDATE" -eq 1 ]; then
         tray_args+=(--no-pricing-update)
     fi
-    exec "$tray_python" "${SCRIPT_DIR}/ai-usage-tray.py" "${tray_args[@]}"
+    if [ "$FOREGROUND" -eq 1 ]; then
+        exec "$tray_python" "${SCRIPT_DIR}/ai-usage-tray.py" "${tray_args[@]}"
+    fi
+    exec "$tray_python" - "${SCRIPT_DIR}/ai-usage-tray.py" "${tray_args[@]}" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+os.umask(0o077)
+state_home = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+log_path = state_home / "ai-usage-explorer" / "tray.log"
+try:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-u", *sys.argv[1:]],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+except OSError as exc:
+    print(f"ERROR: Could not start the tray: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    returncode = process.wait(timeout=1)
+except subprocess.TimeoutExpired:
+    print(f"Tray started in the background (PID {process.pid}). You can close this terminal.")
+    print(f"Log: {log_path}")
+else:
+    print(f"ERROR: Tray exited during startup. See {log_path}", file=sys.stderr)
+    sys.exit(returncode if returncode > 0 else 1)
+PY
 }
 
 manage_tray_autostart() {

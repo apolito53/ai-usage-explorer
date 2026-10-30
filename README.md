@@ -46,6 +46,9 @@ On Ubuntu:
 ./ai-usage-explorer.sh --tray
 ```
 
+The tray runs in the background, so you can close the terminal after it starts.
+Use `--tray --foreground` to keep its output in the terminal for debugging.
+
 See [Ubuntu tray setup](docs/UBUNTU_TRAY.md) for dependencies and autostart.
 
 On macOS:

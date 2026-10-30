@@ -460,6 +460,7 @@ class TraySummaryTests(unittest.TestCase):
         program, args, environment = execute.call_args.args
         self.assertEqual(str(config.script_path), program)
         self.assertIn('--tray', args)
+        self.assertIn('--foreground', args)
         self.assertIn('--refresh', args)
         self.assertIn('--no-pricing-update', args)
         self.assertEqual('project with spaces', args[args.index('--project') + 1])

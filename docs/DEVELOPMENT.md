@@ -82,7 +82,8 @@ any guard.
 
 ## Test organization
 
-- `test_startup.py` uses source ordering assertions for launcher invariants.
+- `test_startup.py` checks launcher ordering and exercises tray detachment,
+  logging, startup failures, and foreground mode with a stand-in tray process.
 - `test_pricing.py` extracts embedded pricing functions with `ast` and tests
   historical backfill.
 - `test_model_filter.py` extracts terminal filter functions/classes with `ast`.

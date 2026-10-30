@@ -44,7 +44,8 @@ packages are installed into the repository-local `.venv` automatically.
 | `--refresh` | Omits `ccusage --offline`, allowing `ccusage` to refresh its own pricing information. |
 | `--demo` | Uses `demo/usage-demo.json` instead of local usage. |
 | `--file PATH` | Uses an existing normalized JSON payload instead of invoking `ccusage`. |
-| `--tray` | Starts the Ubuntu panel indicator. |
+| `--tray` | Starts the Ubuntu panel indicator in the background; closing the terminal leaves it running. |
+| `--foreground` | With `--tray`, keeps the indicator attached to the terminal for debugging. |
 | `--install-tray-autostart` | Installs the Ubuntu per-user autostart entry. |
 | `--remove-tray-autostart` | Removes that Ubuntu autostart entry. |
 | `--no-update` | Disables the startup Git update check for this run. |
@@ -105,6 +106,8 @@ between the custom fields; `Enter` advances or applies.
 | `AI_USAGE_EXPLORER_TRAY_UPDATE_SECONDS` | Desktop-companion Git check interval; minimum 300 seconds, default 3600. |
 
 `XDG_CONFIG_HOME` controls the Ubuntu autostart location in the usual XDG way.
+`XDG_STATE_HOME` controls the background tray log location, which defaults to
+`~/.local/state/ai-usage-explorer/tray.log`.
 
 ## Network and local data
 

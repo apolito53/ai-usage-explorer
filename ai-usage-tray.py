@@ -550,7 +550,8 @@ def prepare_updates(script_path: Path, revision: str, ccusage_version: str):
 
 
 def restart_tray(config: TrayConfig):
-    args = [str(config.script_path), "--tray", "--no-update"]
+    # Keep the existing session and log streams when replacing this process.
+    args = [str(config.script_path), "--tray", "--foreground", "--no-update"]
     if config.project:
         args.extend(["--project", config.project])
     if config.online:

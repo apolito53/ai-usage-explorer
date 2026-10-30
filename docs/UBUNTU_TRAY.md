@@ -25,6 +25,15 @@ Node.js plus an installed `ccusage`, `pnpm`, or npm/`npx`.
 ./ai-usage-explorer.sh --tray
 ```
 
+The launcher returns after starting the tray in its own session. You can close
+the terminal and the tray keeps running; use **Quit** in its menu to stop it.
+Output is appended to `${XDG_STATE_HOME:-~/.local/state}/ai-usage-explorer/tray.log`.
+To keep the tray attached to the terminal and see its output directly:
+
+```bash
+./ai-usage-explorer.sh --tray --foreground
+```
+
 The menu displays:
 
 - month-to-date and today's Claude cost;
