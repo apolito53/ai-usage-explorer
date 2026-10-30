@@ -47,20 +47,23 @@ Choose **Usage graphs…**, then **This month** for daily or cumulative spending
 or **Today** for an intraday chart. Today's interval selector offers **1h · 30m ·
 15m · 5m · 1m**. Choose **Per interval** for spending within each interval, or
 **Cumulative** for the running total since local midnight. Both modes use the
-selected interval. Daily spending and Per interval use bars; Cumulative uses a
-shaded line. Today keeps its mode selection separate from This month. Hover
-to inspect a point, or Tab to the chart and use Left/Right. Empty elapsed
+selected interval. Daily spending and Per interval use stacked bars, with a
+color for each model and a legend below the chart; Cumulative uses a shaded
+line. Model colors stay consistent while the window is open. Hover to see the
+total and each model's cost, or Tab to the chart and use Left/Right. Spending
+without a model breakdown is shown as gray **Unattributed** segments.
+Today keeps its mode selection separate from This month. Empty elapsed
 intervals are zero in Per interval mode and flat in Cumulative mode; the
 current interval is labeled as incomplete, and future
 intervals are not plotted. Times follow your computer's local timezone.
 Escape or closing the window hides it while the tray keeps running.
 
-In **This month → Daily spending**, darker bars have timestamped day details.
+In **This month → Daily spending**, outlined bars have timestamped day details.
 Click one (or select it with Left/Right and press Enter) to open that date with
 the same interval and cumulative controls as Today. Past dates cover the full
 local day; clicking today's bar opens Today. **← This month** returns to the
-selected bar. Lighter bars show daily totals only, and a legend below the month
-chart explains both colors. A day can have partial timestamped history; any
+selected bar. Bars without an outline show daily totals only.
+A day can have partial timestamped history; any
 difference from its daily total is shown below the detail chart.
 
 The day charts read timestamped usage already present in Claude's local

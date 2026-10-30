@@ -32,6 +32,25 @@ class IntradayUsage:
     costs: tuple = ()
     unpriced: int = 0
     error: str = ""
+    model_costs: tuple = ()
+
+
+def cost_breakdown(total, models):
+    """Keep totals authoritative; never invent attribution for missing costs."""
+    parts = {model: cost for model, cost in models.items() if math.isfinite(cost) and cost > 0}
+    attributed = sum(parts.values())
+    if total <= 0:
+        return {}
+    if parts and math.isclose(attributed, total, abs_tol=1e-9):
+        # Summing per model changes floating-point rounding; avoid phantom gray segments.
+        largest = max(parts, key=parts.get)
+        parts[largest] += total - attributed
+        return parts
+    if attributed > total:
+        return {"": total} if total > 0 else {}
+    if total > attributed:
+        parts[""] = parts.get("", 0) + total - attributed
+    return parts
 
 
 def claude_log_roots():
@@ -167,7 +186,7 @@ class ClaudeLogReader:
                 events.extend(cached[1])
         self._files = files
         current = now.astimezone()
-        costs, unpriced = {}, {}
+        costs, unpriced, model_costs = {}, {}, {}
         for event in deduplicate_events(events):
             day = event.timestamp.astimezone().date()
             if (day.year, day.month) != (current.year, current.month) or event.timestamp > current:
@@ -178,8 +197,10 @@ class ClaudeLogReader:
                 unpriced[day] = unpriced.get(day, 0) + 1
             else:
                 costs[day].append((event.timestamp, cost))
+                model_costs.setdefault(day, []).append((event.timestamp, event.model, cost))
         return {
-            day: IntradayUsage(tuple(sorted(records)), unpriced.get(day, 0))
+            day: IntradayUsage(tuple(sorted(records)), unpriced.get(day, 0),
+                              model_costs=tuple(sorted(model_costs.get(day, ()))))
             for day, records in costs.items()
         }
 
@@ -208,3 +229,16 @@ def bucket_costs(costs, now, minutes, day=None):
         (datetime.fromtimestamp(start + index * step, timezone.utc).astimezone(), cost)
         for index, cost in enumerate(totals)
     )
+
+
+def bucket_model_costs(model_costs, now, minutes, day=None):
+    """Use the same local-day/DST boundaries as the total-cost series."""
+    models = {}
+    for timestamp, model, cost in model_costs:
+        models.setdefault(model, []).append((timestamp, cost))
+    buckets = [{} for _ in bucket_costs((), now, minutes, day)]
+    for model, costs in models.items():
+        for parts, (_timestamp, cost) in zip(buckets, bucket_costs(costs, now, minutes, day)):
+            if cost > 0:
+                parts[model] = cost
+    return tuple(buckets)

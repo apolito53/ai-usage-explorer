@@ -18,7 +18,10 @@ class ChartDataTests(unittest.TestCase):
                 (datetime(2026, 10, 8, 0, 10).astimezone(), 2),
                 (datetime(2026, 10, 8, 1, 10).astimezone(), 3),
             ))},
+            daily_model_costs={date(2026, 10, 8): {"claude-opus-5": 3, "claude-sonnet-4": 2}},
         )
+        graph.model_colors = {"": (0.55, 0.58, 0.62)}
+        graph.Gtk = Mock()
         graph.view, graph.history_day, graph.selected = "month", None, None
         graph.cumulative = graph.today_cumulative = graph.day_cumulative = False
         graph.interval_minutes = 60
@@ -26,6 +29,7 @@ class ChartDataTests(unittest.TestCase):
         for name in ("detail", "area", "subtitle", "chart_note", "legend", "history_controls", "ranges",
                      "month_label", "today_label", "updated", "_set_cursor"):
             setattr(graph, name, Mock())
+        graph.legend.get_children.return_value = []
         graph.ranges.set_visible_child_name.side_effect = lambda view: graph._select_view(
             SimpleNamespace(get_visible_child_name=lambda: view), None,
         )
@@ -88,7 +92,7 @@ class ChartDataTests(unittest.TestCase):
         self.assertTrue(graph._click(graph.area, SimpleNamespace(x=50, y=90, button=1)))
         self.assertEqual("day", graph.view)
         self.assertEqual(date(2026, 10, 8), graph.history_day)
-        graph.legend.set_visible.assert_called_with(False)
+        graph.legend.set_visible.assert_called_with(True)
         self.assertEqual(24, len(graph.series))
         self.assertEqual(5, sum(cost for _time, cost in graph.series))
         self.assertNotIn("so far", graph.detail.set_text.call_args.args[0])
@@ -144,6 +148,27 @@ class ChartDataTests(unittest.TestCase):
                 self.assertGreaterEqual(scale, max(values, default=0))
                 ticks = [UsageGraphWindow._axis_label(scale * index / 4) for index in range(5)]
                 self.assertEqual(5, len(set(ticks)))
+
+    def test_model_stacks_preserve_totals_hover_details_and_colors_across_views(self):
+        graph = self.make_graph()
+        graph.selected = 0
+        graph._update_detail()
+        self.assertIn("opus-5 $3.00 · sonnet-4 $2.00", graph.detail.set_text.call_args.args[0])
+        colors = dict(graph.model_colors)
+        self.assertEqual([5, 3, 2], [sum(parts.values()) for parts in graph.model_series])
+        self.assertEqual({"": 3}, graph.model_series[1])
+        day = date(2026, 10, 8)
+        costs = graph.snapshot.intraday_days[day].costs
+        graph.snapshot.intraday_days[day] = IntradayUsage(costs, model_costs=(
+            (costs[0][0], "claude-sonnet-4", 2), (costs[1][0], "claude-opus-5", 3),
+        ))
+        graph._open_day(0)
+        self.assertEqual({"claude-sonnet-4": 2}, graph.model_series[0])
+        self.assertEqual({"claude-opus-5": 3}, graph.model_series[1])
+        self.assertEqual(colors, graph.model_colors)
+        graph._select_mode(Mock(get_active=lambda: True), True, "day")
+        graph.legend.set_visible.assert_called_with(False)
+        self.assertEqual(5, graph._values()[-1])
 
 
 if __name__ == "__main__":

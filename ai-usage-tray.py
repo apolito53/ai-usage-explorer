@@ -248,6 +248,34 @@ def claude_daily_costs(data: Dict, now: datetime) -> Tuple[Tuple[date, float], .
     )
 
 
+def claude_daily_model_costs(data: Dict, now: datetime) -> Dict:
+    from ai_usage_intraday import cost_breakdown
+
+    days = dict(claude_daily_costs(data, now))
+    result = {day: {} for day in days}
+    rows = data.get("daily", [])
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        value = row_date(row)
+        parsed = parse_row_date(value) if len(value) in (8, 10) else None
+        total = safe_float(row.get("totalCost"))
+        if parsed is None or parsed.date() not in days or not math.isfinite(total) or total < 0:
+            continue
+        models = {}
+        items = row.get("modelBreakdowns", [])
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            model, cost = str(item.get("modelName") or ""), safe_float(item.get("cost"))
+            if math.isfinite(cost) and cost > 0:
+                models[model] = models.get(model, 0) + cost
+        parts = result[parsed.date()]
+        for model, cost in cost_breakdown(total, models).items():
+            parts[model] = parts.get(model, 0) + cost
+    return result
+
+
 @dataclass(frozen=True)
 class UsageSnapshot:
     month_cost: float
@@ -258,6 +286,7 @@ class UsageSnapshot:
     intraday_days: Dict = field(default_factory=dict)
     ccusage_path: str = ""
     ccusage_version: str = ""
+    daily_model_costs: Dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -467,6 +496,7 @@ def fetch_usage_snapshot(config: TrayConfig, refresh_pricing: bool, log_reader=N
         claude_month_cost(data, now), claude_today_cost(data, now), now,
         claude_daily_costs(data, now), intraday, intraday_days,
         data.get("ccusagePath", ""), data.get("ccusageVersion", ""),
+        claude_daily_model_costs(data, now),
     )
 
 
@@ -1053,12 +1083,17 @@ class ClaudeUsageTray:
     def open_graphs(self, _item=None):
         if self.graph_window is None:
             try:
-                from ai_usage_chart import UsageGraphWindow
+                from ai_usage_chart import ChartDependencyError, UsageGraphWindow
+            except ImportError as exc:
+                self._set_status("Could not load chart code; restart the tray (see log)")
+                print(f"Could not load usage graphs: {exc}", file=sys.stderr)
+                return
 
+            try:
                 self.graph_window = UsageGraphWindow(
                     self.Gtk, self.refresh, self.config.project,
                 )
-            except (ImportError, ValueError) as exc:
+            except ChartDependencyError as exc:
                 self._set_status(
                     "Charts require python3-gi-cairo (sudo apt install python3-gi-cairo)"
                 )

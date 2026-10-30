@@ -25,6 +25,39 @@ SPEC.loader.exec_module(TRAY)
 
 
 class TraySummaryTests(unittest.TestCase):
+    def test_chart_import_failure_does_not_claim_cairo_is_missing(self):
+        import builtins
+
+        tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
+        tray.graph_window = None
+        tray._set_status = Mock()
+        original_import = builtins.__import__
+
+        def stale_import(name, *args, **kwargs):
+            if name == "ai_usage_chart":
+                raise ImportError("cannot import name 'bucket_model_costs' from 'ai_usage_intraday'")
+            return original_import(name, *args, **kwargs)
+
+        with patch('builtins.__import__', side_effect=stale_import), patch('sys.stderr'):
+            tray.open_graphs()
+        message = tray._set_status.call_args.args[0]
+        self.assertIn("restart the tray", message)
+        self.assertNotIn("cairo", message)
+        self.assertIsNone(tray.graph_window)
+
+    def test_chart_cairo_failure_keeps_dependency_install_hint(self):
+        from ai_usage_chart import ChartDependencyError
+
+        tray = TRAY.ClaudeUsageTray.__new__(TRAY.ClaudeUsageTray)
+        tray.graph_window = None
+        tray.Gtk, tray.refresh, tray._set_status = Mock(), Mock(), Mock()
+        tray.config = SimpleNamespace(project="")
+        with patch('ai_usage_chart.UsageGraphWindow', side_effect=ChartDependencyError("missing Cairo")), \
+             patch('sys.stderr'):
+            tray.open_graphs()
+        self.assertIn("python3-gi-cairo", tray._set_status.call_args.args[0])
+        self.assertIsNone(tray.graph_window)
+
     def test_configured_symbolic_icon_exists(self):
         self.assertTrue((ROOT / "assets" / f"{TRAY.ICON_NAME}.svg").is_file())
 
@@ -156,6 +189,27 @@ class TraySummaryTests(unittest.TestCase):
             TRAY.claude_daily_costs({}, datetime(2026, 9, 1)),
         )
 
+    def test_daily_model_costs_combine_rows_and_preserve_missing_breakdowns(self):
+        usage = {"daily": [
+            {"date": "2026-08-01", "totalCost": 5, "modelBreakdowns": [
+                {"modelName": "opus", "cost": 2}, {"modelName": "sonnet", "cost": 1}]},
+            {"date": "20260801", "totalCost": 3, "modelBreakdowns": [
+                {"modelName": "opus", "cost": 3}]},
+            {"date": "2026-08-01", "totalCost": 1},
+            {"date": "2026-08-02", "totalCost": 4, "modelBreakdowns": [
+                {"modelName": "opus", "cost": 9}]},
+            {"date": "2026-08-04", "totalCost": 100},
+            {"date": "2026-07-31", "totalCost": 100},
+            None,
+        ]}
+        now = datetime(2026, 8, 3)
+        result = TRAY.claude_daily_model_costs(usage, now)
+        self.assertEqual({"opus": 5, "sonnet": 1, "": 3}, result[date(2026, 8, 1)])
+        self.assertEqual({"": 4}, result[date(2026, 8, 2)])
+        self.assertEqual({}, result[date(2026, 8, 3)])
+        self.assertEqual(dict(TRAY.claude_daily_costs(usage, now)),
+                         {day: sum(parts.values()) for day, parts in result.items()})
+
     def test_snapshot_uses_backfilled_daily_data_and_preserves_shared_totals_api(self):
         config = SimpleNamespace(pricing_history_path=Path("/unused"))
         now = datetime(2026, 8, 3)
@@ -163,6 +217,7 @@ class TraySummaryTests(unittest.TestCase):
 
         def backfill(data, _history):
             data["daily"][0]["totalCost"] = 12.5
+            data["daily"][0]["modelBreakdowns"] = [{"modelName": "opus", "cost": 12.5}]
 
         with patch.object(TRAY, "datetime") as clock, \
              patch.object(TRAY, "fetch_command", return_value=["fake"]), \
@@ -175,6 +230,7 @@ class TraySummaryTests(unittest.TestCase):
             self.assertEqual((date(2026, 8, 3), 12.5), snapshot.daily_costs[-1])
             self.assertEqual(12.5, snapshot.month_cost)
             self.assertEqual(12.5, snapshot.today_cost)
+            self.assertEqual({"opus": 12.5}, snapshot.daily_model_costs[now.date()])
             self.assertEqual((12.5, 12.5, now), TRAY.fetch_usage(config, False))
 
     def test_refresh_updates_open_chart_and_error_keeps_last_snapshot(self):

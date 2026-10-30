@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+import colorsys
 import math
 from datetime import datetime
 from itertools import accumulate
 
-from ai_usage_intraday import INTERVAL_MINUTES, bucket_costs
+from ai_usage_intraday import INTERVAL_MINUTES, bucket_costs, bucket_model_costs, cost_breakdown
 
 
 ACCENT = (0.12, 0.65, 0.57)
-DETAIL_BAR_COLOR = (0.06, 0.44, 0.38)
-TOTAL_BAR_COLOR = (0.54, 0.80, 0.75)
+MODEL_COLORS = (
+    (0.12, 0.65, 0.57), (0.35, 0.52, 0.86), (0.90, 0.57, 0.20),
+    (0.70, 0.43, 0.78), (0.86, 0.39, 0.46), (0.55, 0.66, 0.23),
+)
+
+
+def model_label(model):
+    if not model:
+        return "Unattributed"
+    return model[7:] if model.startswith("claude-") else model
+
+
+def cost_label(value):
+    return f"${value:,.4f}" if 0 < value < 0.01 else f"${value:,.2f}"
 
 
 def chart_values(daily_costs, cumulative=False):
@@ -28,13 +41,20 @@ def chart_scale(values):
     return step * 4
 
 
+class ChartDependencyError(RuntimeError):
+    """GTK's Cairo bridge is unavailable in the active Python environment."""
+
+
 class UsageGraphWindow:
     def __init__(self, gtk, refresh, project=""):
-        import gi
+        try:
+            import gi
 
-        gi.require_foreign("cairo")
-        from gi.repository import Gdk
-        import cairo
+            gi.require_foreign("cairo")
+            from gi.repository import Gdk
+            import cairo
+        except (ImportError, ValueError) as exc:
+            raise ChartDependencyError(str(exc)) from exc
 
         self.Gtk, self.Gdk, self.cairo = gtk, Gdk, cairo
         self.snapshot = None
@@ -47,6 +67,8 @@ class UsageGraphWindow:
         self.interval_buttons = {}
         self.history_interval_buttons = {}
         self.series = ()
+        self.model_series = ()
+        self.model_colors = {"": (0.55, 0.58, 0.62)}
         self.plot_bounds = None
         self.chart_message = "Waiting for usage…"
         self.selected = None
@@ -103,6 +125,8 @@ class UsageGraphWindow:
         self.history_controls.hide()
 
         self.detail = gtk.Label(label="Waiting for usage…", xalign=0)
+        self.detail.set_line_wrap(True)
+        self.detail.set_max_width_chars(75)
         body.pack_start(self.detail, False, False, 0)
         self.area = gtk.DrawingArea()
         self.area.set_size_request(440, 190)
@@ -117,7 +141,7 @@ class UsageGraphWindow:
         self.area.get_accessible().set_name("Claude spending chart")
         self.area.set_tooltip_text(
             "Hover to inspect usage, or focus the chart and use Left / Right.\n"
-            "Click a darker daily bar or press Enter to open day details."
+            "Colors show models. Click an outlined daily bar or press Enter for day details."
         )
         body.pack_start(self.area, True, True, 0)
 
@@ -125,17 +149,11 @@ class UsageGraphWindow:
         self.chart_note.set_line_wrap(True)
         self.chart_note.set_no_show_all(True)
         body.pack_start(self.chart_note, False, False, 0)
-        self.legend = gtk.Box(spacing=20)
-        for color, caption in ((DETAIL_BAR_COLOR, "Day details available · click a bar"),
-                               (TOTAL_BAR_COLOR, "Daily total only")):
-            item = gtk.Box(spacing=6)
-            swatch = gtk.DrawingArea()
-            swatch.set_size_request(12, 12)
-            swatch.connect("draw", self._draw_swatch, color)
-            item.pack_start(swatch, False, False, 0)
-            item.pack_start(gtk.Label(label=caption), False, False, 0)
-            self.legend.pack_start(item, False, False, 0)
-        self.legend.show_all()
+        self.legend = gtk.FlowBox()
+        self.legend.set_selection_mode(gtk.SelectionMode.NONE)
+        self.legend.set_column_spacing(16)
+        self.legend.set_row_spacing(4)
+        self.legend.set_max_children_per_line(3)
         self.legend.set_no_show_all(True)
         body.pack_start(self.legend, False, False, 0)
         self.ranges.connect("notify::visible-child-name", self._select_view)
@@ -268,8 +286,33 @@ class UsageGraphWindow:
     def _values(self):
         return chart_values(self.series, self._is_cumulative())
 
+    def _update_legend(self):
+        models = sorted({model for parts in self.model_series for model in parts})
+        for model in models:
+            if model not in self.model_colors:
+                index = len(self.model_colors) - 1
+                self.model_colors[model] = (MODEL_COLORS[index] if index < len(MODEL_COLORS)
+                                            else colorsys.hsv_to_rgb((index * 0.618034) % 1, 0.6, 0.8))
+        for child in self.legend.get_children():
+            self.legend.remove(child)
+        for model in models:
+            item = self.Gtk.Box(spacing=6)
+            swatch = self.Gtk.DrawingArea()
+            swatch.set_size_request(12, 12)
+            swatch.connect("draw", self._draw_swatch, self.model_colors[model])
+            item.pack_start(swatch, False, False, 0)
+            label = self.Gtk.Label(label=model_label(model))
+            label.set_line_wrap(True)
+            label.set_max_width_chars(30)
+            item.pack_start(label, False, False, 0)
+            self.legend.add(item)
+            item.show_all()
+            item.get_parent().show()
+        self.legend.set_visible(bool(models) and not self._is_cumulative())
+
     def _update_chart(self):
         self.series = ()
+        self.model_series = ()
         note = ""
         self.chart_message = "Waiting for usage…"
         if self.snapshot is not None:
@@ -290,6 +333,9 @@ class UsageGraphWindow:
                     note = usage.error
                 else:
                     self.series = bucket_costs(usage.costs, now, self.interval_minutes, day)
+                    breakdowns = bucket_model_costs(usage.model_costs, now, self.interval_minutes, day)
+                    self.model_series = tuple(cost_breakdown(total, parts)
+                                              for (_time, total), parts in zip(self.series, breakdowns))
                     self.chart_message = "No priced usage available" if usage.unpriced else "No recorded spending"
                     note = "Local time"
                     if self._is_cumulative():
@@ -308,12 +354,18 @@ class UsageGraphWindow:
             else:
                 self.subtitle.set_text(now.strftime("%B %Y") + " · USD")
                 self.series = self.snapshot.daily_costs
+                self.model_series = tuple(
+                    cost_breakdown(total, self.snapshot.daily_model_costs.get(day, {}))
+                    for day, total in self.series
+                )
                 self.chart_message = "No recorded spending this month"
+                if not self.cumulative:
+                    note = "Colors show models · outlined bars have day details (click or press Enter)"
         if self.selected is not None and self.selected >= len(self.series):
             self.selected = None
         self.chart_note.set_text(note)
         self.chart_note.set_visible(bool(note))
-        self.legend.set_visible(self.view == "month" and not self.cumulative)
+        self._update_legend()
         self.plot_bounds = None
         self._update_detail()
         self.area.queue_draw()
@@ -325,7 +377,7 @@ class UsageGraphWindow:
         index = self.selected if self.selected is not None else len(self.series) - 1
         day, _cost = self.series[index]
         value = self._values()[index]
-        amount = f"${value:,.4f}" if 0 < value < 0.01 else f"${value:,.2f}"
+        amount = cost_label(value)
         if self.view in ("today", "day"):
             end = datetime.fromtimestamp(day.timestamp() + self.interval_minutes * 60).astimezone()
             is_today = day.date() == self.snapshot.refreshed_at.date()
@@ -347,6 +399,13 @@ class UsageGraphWindow:
             if not self.cumulative:
                 description += (" · click or press Enter for details" if self._has_day_details(day)
                                 else " · daily total only")
+        if not self._is_cumulative() and self.model_series:
+            parts = self.model_series[index]
+            if parts:
+                description += "\n" + " · ".join(
+                    f"{model_label(model)} {cost_label(cost)}"
+                    for model, cost in sorted(parts.items())
+                )
         self.detail.set_text(description)
         self.area.get_accessible().set_description(description)
 
@@ -519,13 +578,18 @@ class UsageGraphWindow:
                 # Keep sparse bars compact and dense minute bars within their slots.
                 bar_width = self._bar_width(slot_width)
                 for index, (x, y) in enumerate(points):
-                    if self.view == "month":
-                        color = DETAIL_BAR_COLOR if self._has_day_details(self.series[index][0]) else TOTAL_BAR_COLOR
-                        cr.set_source_rgb(*color)
-                    else:
-                        cr.set_source_rgba(*accent, 1 if index == selected else 0.75)
-                    cr.rectangle(x - bar_width / 2, y, bar_width, bottom - y)
-                    cr.fill()
+                    base = bottom
+                    for model, cost in sorted(self.model_series[index].items()):
+                        segment_height = cost / ceiling * plot_height
+                        cr.set_source_rgb(*self.model_colors[model])
+                        cr.rectangle(x - bar_width / 2, base - segment_height, bar_width, segment_height)
+                        cr.fill()
+                        base -= segment_height
+                    if self.view == "month" and self._has_day_details(self.series[index][0]) and values[index] > 0:
+                        cr.set_source_rgba(*foreground, 0.65)
+                        cr.set_line_width(1)
+                        cr.rectangle(x - bar_width / 2, y, bar_width, bottom - y)
+                        cr.stroke()
 
             x, y = points[selected]
             if self.selected is not None:

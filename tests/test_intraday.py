@@ -11,6 +11,7 @@ from unittest.mock import patch
 from ai_usage_intraday import (
     INTERVAL_MINUTES, ClaudeLogReader, bucket_costs, claude_log_roots,
     deduplicate_events, parse_usage_event,
+    bucket_model_costs, cost_breakdown,
 )
 
 
@@ -34,6 +35,30 @@ def record(timestamp="2026-10-09T13:05:00Z", message_id="msg", request_id="req",
 
 
 class IntradayTests(unittest.TestCase):
+    def test_missing_or_inconsistent_attribution_keeps_total(self):
+        self.assertEqual({"opus": 2, "": 3}, cost_breakdown(5, {"opus": 2}))
+        self.assertEqual({"": 5}, cost_breakdown(5, {"opus": 6}))
+        self.assertEqual({}, cost_breakdown(0, {}))
+        self.assertEqual({"": 5}, cost_breakdown(5, {"bad": float("nan"), "negative": -1}))
+        for total in (0.3, 0.3000000000000001):
+            parts = cost_breakdown(total, {"opus": 0.1, "sonnet": 0.2})
+            self.assertNotIn("", parts)
+            self.assertAlmostEqual(total, sum(parts.values()))
+
+    def test_model_buckets_preserve_dst_and_interval_totals(self):
+        with local_timezone("America/New_York"):
+            now = datetime(2026, 11, 1, 7, 5, tzinfo=timezone.utc)
+            records = ((datetime(2026, 11, 1, 5, 15, tzinfo=timezone.utc), "opus", 1),
+                       (datetime(2026, 11, 1, 6, 15, tzinfo=timezone.utc), "sonnet", 2),
+                       (datetime(2026, 11, 1, 6, 15, tzinfo=timezone.utc), "opus", 3),
+                       (datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc), "opus", 100))
+            for minutes in INTERVAL_MINUTES:
+                parts = bucket_model_costs(records, now, minutes)
+                totals = bucket_costs([(stamp, cost) for stamp, _model, cost in records], now, minutes)
+                self.assertEqual([cost for _stamp, cost in totals], [sum(part.values()) for part in parts])
+            self.assertEqual(({}, {"opus": 1}, {"opus": 3, "sonnet": 2}, {}),
+                             bucket_model_costs(records, now, 60))
+
     def test_streaming_and_cross_file_duplicates_keep_complete_usage(self):
         events = [parse_usage_event(row, "fallback") for row in (
             record(tokens=10), record(tokens=100), record(tokens=10),
@@ -140,6 +165,9 @@ class IntradayTests(unittest.TestCase):
             self.assertEqual({date(2026, 10, day) for day in (1, 8, 9)}, set(days))
             self.assertEqual([1, 2, 3], [sum(cost for _time, cost in days[day].costs) for day in sorted(days)])
             self.assertEqual([0, 0, 1], [days[day].unpriced for day in sorted(days)])
+            for usage in days.values():
+                self.assertEqual(usage.costs, tuple((stamp, cost) for stamp, _model, cost in usage.model_costs))
+                self.assertTrue(all(model == "claude-test" for _stamp, model, _cost in usage.model_costs))
             # Cached historical files still provide details without another read.
             with patch.object(reader, "_read_file", side_effect=AssertionError("reread")):
                 self.assertEqual(days, reader.load_days(now, "wanted", price))
