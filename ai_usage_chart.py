@@ -69,6 +69,11 @@ class UsageGraphWindow:
         self.series = ()
         self.model_series = ()
         self.model_colors = {"": (0.55, 0.58, 0.62)}
+        # None follows all models (including new ones); an empty set selects none.
+        self.selected_models = None
+        self.legend_models = ()
+        self.model_checks = {}
+        self.syncing_models = False
         self.plot_bounds = None
         self.chart_message = "Waiting for usage…"
         self.selected = None
@@ -84,6 +89,10 @@ class UsageGraphWindow:
         title = gtk.Label(xalign=0)
         title.set_markup('<span size="x-large" weight="bold">Claude usage</span>')
         body.pack_start(title, False, False, 0)
+        self.model_filter_label = gtk.Label(label="All models", xalign=0)
+        self.model_filter_label.set_line_wrap(True)
+        self.model_filter_label.set_max_width_chars(75)
+        body.pack_start(self.model_filter_label, False, False, 0)
         self.subtitle = gtk.Label(label="Waiting for usage…", xalign=0)
         body.pack_start(self.subtitle, False, False, 0)
         if project:
@@ -149,6 +158,14 @@ class UsageGraphWindow:
         self.chart_note.set_line_wrap(True)
         self.chart_note.set_no_show_all(True)
         body.pack_start(self.chart_note, False, False, 0)
+        model_controls = gtk.Box(spacing=8)
+        caption = gtk.Label(label="Models · click a name to show only it", xalign=0)
+        model_controls.pack_start(caption, True, True, 0)
+        for caption, selection in (("All", None), ("None", set())):
+            button = gtk.Button(label=caption)
+            button.connect("clicked", self._select_models, selection)
+            model_controls.pack_start(button, False, False, 0)
+        body.pack_start(model_controls, False, False, 0)
         self.legend = gtk.FlowBox()
         self.legend.set_selection_mode(gtk.SelectionMode.NONE)
         self.legend.set_column_spacing(16)
@@ -221,11 +238,6 @@ class UsageGraphWindow:
             snapshot.refreshed_at.year, snapshot.refreshed_at.month,
         ):
             self.ranges.set_visible_child_name("month")
-        for label, caption, value in (
-            (self.month_label, "Month to date", snapshot.month_cost),
-            (self.today_label, "Today", snapshot.today_cost),
-        ):
-            label.set_markup(f'{caption}\n<span size="x-large" weight="bold">${value:,.2f}</span>')
         self.updated.set_text(snapshot.refreshed_at.strftime("Updated %b %-d, %-I:%M %p"))
         self._update_chart()
 
@@ -286,29 +298,101 @@ class UsageGraphWindow:
     def _values(self):
         return chart_values(self.series, self._is_cumulative())
 
+    def _filter_parts(self, parts):
+        if self.selected_models is None:
+            return parts
+        return {model: cost for model, cost in parts.items() if model in self.selected_models}
+
+    def _daily_parts(self, day, total):
+        return cost_breakdown(total, self.snapshot.daily_model_costs.get(day, {}))
+
+    def _select_models(self, _button, selection):
+        self.selected_models = None if selection is None else set(selection)
+        self._update_chart()
+
+    def _toggle_model(self, button, model):
+        if self.syncing_models:
+            return
+        selection = set(self.legend_models) if self.selected_models is None else set(self.selected_models)
+        if button.get_active():
+            selection.add(model)
+        else:
+            selection.discard(model)
+        self._select_models(None, None if selection == set(self.legend_models) else selection)
+
+    def _update_header(self):
+        if self.selected_models is None:
+            caption = "All models"
+        elif not self.selected_models:
+            caption = "No models selected"
+        else:
+            caption = "Models: " + ", ".join(model_label(model) for model in sorted(self.selected_models))
+        self.model_filter_label.set_text(caption)
+        if self.snapshot is None:
+            return
+        month, today = self.snapshot.month_cost, self.snapshot.today_cost
+        if self.selected_models is not None:
+            month = sum(sum(self._filter_parts(self._daily_parts(day, total)).values())
+                        for day, total in self.snapshot.daily_costs)
+            today = sum(self._filter_parts(self._daily_parts(self.snapshot.refreshed_at.date(), today)).values())
+        for label, caption, value in ((self.month_label, "Month to date", month),
+                                      (self.today_label, "Today", today)):
+            label.set_markup(f'{caption}\n<span size="x-large" weight="bold">${value:,.2f}</span>')
+
     def _update_legend(self):
-        models = sorted({model for parts in self.model_series for model in parts})
+        models = {model for parts in self.model_series for model in parts}
+        if self.snapshot is not None:
+            for day, total in self.snapshot.daily_costs:
+                models.update(self._daily_parts(day, total))
+            for usage in (*self.snapshot.intraday_days.values(), self.snapshot.intraday):
+                if usage is not None and not usage.error:
+                    models.update(model for _time, model, cost in usage.model_costs if cost > 0)
+        if self.selected_models is not None:
+            models.update(self.selected_models)
+        models = tuple(sorted(models))
         for model in models:
             if model not in self.model_colors:
                 index = len(self.model_colors) - 1
                 self.model_colors[model] = (MODEL_COLORS[index] if index < len(MODEL_COLORS)
                                             else colorsys.hsv_to_rgb((index * 0.618034) % 1, 0.6, 0.8))
-        for child in self.legend.get_children():
-            self.legend.remove(child)
-        for model in models:
-            item = self.Gtk.Box(spacing=6)
-            swatch = self.Gtk.DrawingArea()
-            swatch.set_size_request(12, 12)
-            swatch.connect("draw", self._draw_swatch, self.model_colors[model])
-            item.pack_start(swatch, False, False, 0)
-            label = self.Gtk.Label(label=model_label(model))
-            label.set_line_wrap(True)
-            label.set_max_width_chars(30)
-            item.pack_start(label, False, False, 0)
-            self.legend.add(item)
-            item.show_all()
-            item.get_parent().show()
-        self.legend.set_visible(bool(models) and not self._is_cumulative())
+        if models != self.legend_models:
+            for child in self.legend.get_children():
+                self.legend.remove(child)
+            self.legend_models, self.model_checks = models, {}
+            for model in models:
+                item = self.Gtk.Box(spacing=2)
+                check = self.Gtk.CheckButton()
+                check.set_tooltip_text("Include " + model_label(model))
+                check.get_accessible().set_name("Include " + model_label(model))
+                check.connect("toggled", self._toggle_model, model)
+                self.model_checks[model] = check
+                item.pack_start(check, False, False, 0)
+                button = self.Gtk.Button()
+                button.set_relief(self.Gtk.ReliefStyle.NONE)
+                button.set_tooltip_text("Show only " + model_label(model))
+                button.get_accessible().set_name("Show only " + model_label(model))
+                button.connect("clicked", self._select_models, {model})
+                content = self.Gtk.Box(spacing=6)
+                swatch = self.Gtk.DrawingArea()
+                swatch.set_size_request(12, 12)
+                swatch.connect("draw", self._draw_swatch, self.model_colors[model])
+                content.pack_start(swatch, False, False, 0)
+                label = self.Gtk.Label(label=model_label(model))
+                label.set_line_wrap(True)
+                label.set_max_width_chars(30)
+                content.pack_start(label, False, False, 0)
+                button.add(content)
+                item.pack_start(button, False, False, 0)
+                self.legend.add(item)
+                item.show_all()
+                item.get_parent().show()
+        self.syncing_models = True
+        try:
+            for model, check in self.model_checks.items():
+                check.set_active(self.selected_models is None or model in self.selected_models)
+        finally:
+            self.syncing_models = False
+        self.legend.set_visible(bool(models))
 
     def _update_chart(self):
         self.series = ()
@@ -346,16 +430,18 @@ class UsageGraphWindow:
                         note += " · full day"
                     if usage.unpriced:
                         note += f" · {usage.unpriced} usage records could not be priced"
-                    total = sum(cost for _timestamp, cost in usage.costs)
+                    total = sum(sum(self._filter_parts(parts).values()) for parts in self.model_series)
                     daily_total = (self.snapshot.today_cost if is_today
                                    else dict(self.snapshot.daily_costs).get(day, 0))
+                    if self.selected_models is not None:
+                        daily_total = sum(self._filter_parts(self._daily_parts(day, daily_total)).values())
                     if abs(total - daily_total) >= 0.01:
                         note += f"\nTimestamped total: ${total:,.2f} · daily total: ${daily_total:,.2f}"
             else:
                 self.subtitle.set_text(now.strftime("%B %Y") + " · USD")
                 self.series = self.snapshot.daily_costs
                 self.model_series = tuple(
-                    cost_breakdown(total, self.snapshot.daily_model_costs.get(day, {}))
+                    self._daily_parts(day, total)
                     for day, total in self.series
                 )
                 self.chart_message = "No recorded spending this month"
@@ -366,6 +452,14 @@ class UsageGraphWindow:
         self.chart_note.set_text(note)
         self.chart_note.set_visible(bool(note))
         self._update_legend()
+        if self.selected_models is not None:
+            self.model_series = tuple(self._filter_parts(parts) for parts in self.model_series)
+            self.series = tuple((stamp, sum(parts.values()))
+                                for (stamp, _cost), parts in zip(self.series, self.model_series))
+            if self.series:
+                self.chart_message = ("No models selected" if not self.selected_models
+                                      else "No spending for selected models")
+        self._update_header()
         self.plot_bounds = None
         self._update_detail()
         self.area.queue_draw()

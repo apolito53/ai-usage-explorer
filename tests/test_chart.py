@@ -21,13 +21,17 @@ class ChartDataTests(unittest.TestCase):
             daily_model_costs={date(2026, 10, 8): {"claude-opus-5": 3, "claude-sonnet-4": 2}},
         )
         graph.model_colors = {"": (0.55, 0.58, 0.62)}
+        graph.selected_models = None
+        graph.legend_models = ()
+        graph.model_checks = {}
+        graph.syncing_models = False
         graph.Gtk = Mock()
         graph.view, graph.history_day, graph.selected = "month", None, None
         graph.cumulative = graph.today_cumulative = graph.day_cumulative = False
         graph.interval_minutes = 60
         graph.Gdk = SimpleNamespace(KEY_Return=13, KEY_KP_Enter=14, KEY_space=32, KEY_Left=37, KEY_Right=39)
         for name in ("detail", "area", "subtitle", "chart_note", "legend", "history_controls", "ranges",
-                     "month_label", "today_label", "updated", "_set_cursor"):
+                     "month_label", "today_label", "updated", "_set_cursor", "model_filter_label"):
             setattr(graph, name, Mock())
         graph.legend.get_children.return_value = []
         graph.ranges.set_visible_child_name.side_effect = lambda view: graph._select_view(
@@ -167,8 +171,102 @@ class ChartDataTests(unittest.TestCase):
         self.assertEqual({"claude-opus-5": 3}, graph.model_series[1])
         self.assertEqual(colors, graph.model_colors)
         graph._select_mode(Mock(get_active=lambda: True), True, "day")
-        graph.legend.set_visible.assert_called_with(False)
+        graph.legend.set_visible.assert_called_with(True)
         self.assertEqual(5, graph._values()[-1])
+
+    def test_model_selection_filters_stacks_cumulative_header_and_empty_state(self):
+        graph = self.make_graph()
+        original = graph.snapshot.daily_costs
+        graph._select_models(None, {"claude-opus-5"})
+        self.assertEqual([3, 0, 0], graph._values())
+        graph.model_filter_label.set_text.assert_called_with("Models: opus-5")
+        self.assertIn("$3.00", graph.month_label.set_markup.call_args.args[0])
+        self.assertIn("$0.00", graph.today_label.set_markup.call_args.args[0])
+        self.assertEqual({"", "claude-opus-5", "claude-sonnet-4"}, set(graph.legend_models))
+        graph.selected = 0
+        graph._update_detail()
+        self.assertIn("opus-5 $3.00", graph.detail.set_text.call_args.args[0])
+        self.assertNotIn("sonnet", graph.detail.set_text.call_args.args[0])
+        graph._toggle_model(Mock(get_active=lambda: True), "claude-sonnet-4")
+        self.assertEqual([5, 0, 0], graph._values())
+        graph._select_mode(Mock(get_active=lambda: True), True)
+        self.assertEqual([5, 5, 5], graph._values())
+        graph.legend.set_visible.assert_called_with(True)
+        graph._select_models(None, set())
+        self.assertEqual([0, 0, 0], graph._values())
+        self.assertEqual("No models selected", graph.chart_message)
+        graph.model_filter_label.set_text.assert_called_with("No models selected")
+        self.assertIn("$0.00", graph.month_label.set_markup.call_args.args[0])
+        graph._select_models(None, None)
+        self.assertEqual([5, 8, 10], graph._values())
+        self.assertEqual(original, graph.snapshot.daily_costs)
+        self.assertIn("$10.00", graph.month_label.set_markup.call_args.args[0])
+        self.assertIn("$2.00", graph.today_label.set_markup.call_args.args[0])
+
+    def test_filter_persists_across_day_views_intervals_and_refresh(self):
+        graph = self.make_graph()
+        opus, sonnet = "claude-opus-5", "claude-sonnet-4"
+        for day, usage in list(graph.snapshot.intraday_days.items()) + [
+            (graph.snapshot.refreshed_at.date(), graph.snapshot.intraday)
+        ]:
+            models = tuple((stamp, opus if i == 0 else sonnet, cost)
+                           for i, (stamp, cost) in enumerate(usage.costs))
+            replacement = IntradayUsage(usage.costs, model_costs=models)
+            if day == graph.snapshot.refreshed_at.date():
+                graph.snapshot.intraday = replacement
+                graph.snapshot.daily_model_costs[day] = {opus: 2}
+            else:
+                graph.snapshot.intraday_days[day] = replacement
+        graph._select_models(None, {opus})
+        self.assertIn("$5.00", graph.month_label.set_markup.call_args.args[0])
+        self.assertIn("$2.00", graph.today_label.set_markup.call_args.args[0])
+        graph._open_day(0)
+        self.assertEqual("day", graph.view)
+        self.assertEqual(2, sum(graph._values()))
+        note = graph.chart_note.set_text.call_args.args[0]
+        self.assertIn("Timestamped total: $2.00 · daily total: $3.00", note)
+        for minutes in INTERVAL_MINUTES:
+            graph.interval_minutes = minutes
+            graph._update_chart()
+            self.assertEqual(2, sum(graph._values()))
+        graph._back_to_month(None)
+        graph._open_day(2)
+        self.assertEqual("today", graph.view)
+        graph._select_mode(Mock(get_active=lambda: True), True, "today")
+        self.assertEqual(2, graph._values()[-1])
+        graph.set_usage(graph.snapshot)
+        self.assertEqual({opus}, graph.selected_models)
+        self.assertEqual(2, graph._values()[-1])
+
+    def test_refresh_keeps_custom_selection_and_all_includes_new_models(self):
+        graph = self.make_graph()
+        graph._select_models(None, {"claude-opus-5"})
+        graph.snapshot.daily_model_costs[date(2026, 10, 9)] = {"claude-haiku": 3}
+        graph.set_usage(graph.snapshot)
+        self.assertEqual([3, 0, 0], graph._values())
+        self.assertIn("claude-haiku", graph.legend_models)
+        graph._select_models(None, None)
+        graph.snapshot.daily_model_costs[date(2026, 10, 10)] = {"claude-new": 2}
+        graph.set_usage(graph.snapshot)
+        self.assertIsNone(graph.selected_models)
+        self.assertEqual([5, 3, 2], graph._values())
+        self.assertIn("claude-new", graph.legend_models)
+        graph._toggle_model(Mock(get_active=lambda: False), "claude-new")
+        self.assertEqual([5, 3, 0], graph._values())
+        graph._toggle_model(Mock(get_active=lambda: True), "claude-new")
+        self.assertIsNone(graph.selected_models)
+
+    def test_no_usage_for_selected_model_keeps_filters_available(self):
+        graph = self.make_graph()
+        graph._select_models(None, {"claude-opus-5"})
+        graph._open_day(2)
+        self.assertEqual([0, 0, 0], graph._values())
+        self.assertEqual("No spending for selected models", graph.chart_message)
+        self.assertIn("claude-opus-5", graph.legend_models)
+        graph.legend.set_visible.assert_called_with(True)
+        graph._select_models(None, {""})
+        self.assertEqual(2, sum(graph._values()))
+        graph.model_filter_label.set_text.assert_called_with("Models: Unattributed")
 
 
 if __name__ == "__main__":

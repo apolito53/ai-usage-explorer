@@ -52,6 +52,15 @@ color for each model and a legend below the chart; Cumulative uses a shaded
 line. Model colors stay consistent while the window is open. Hover to see the
 total and each model's cost, or Tab to the chart and use Left/Right. Spending
 without a model breakdown is shown as gray **Unattributed** segments.
+All models are selected initially. Click a model name below the chart to show
+only that model, or use its checkbox to add/remove it from a combined view.
+**All** restores every model; **None** clears the selection. The selection
+filters both bar and cumulative charts, hover details, and the Month to date
+and Today header totals. The header lists the selected models. Selection stays
+in place across date/interval changes, refreshes, and hiding/reopening the
+window. With All selected, newly encountered models are included automatically;
+a custom selection stays unchanged. Models remain selectable even when they
+have no spending in the current view.
 Today keeps its mode selection separate from This month. Empty elapsed
 intervals are zero in Per interval mode and flat in Cumulative mode; the
 current interval is labeled as incomplete, and future
