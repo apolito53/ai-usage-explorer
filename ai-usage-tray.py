@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import ctypes
 import ctypes.util
 import importlib
@@ -228,8 +229,10 @@ def format_cost(value: float) -> str:
     return f"${value:,.2f}"
 
 
-def claude_daily_costs(data: Dict, now: datetime) -> Tuple[Tuple[date, float], ...]:
-    """Current month through today, including zero-spend days in the time axis."""
+def claude_daily_costs(data: Dict, now: datetime, month=None) -> Tuple[Tuple[date, float], ...]:
+    """Zero-filled calendar month; the current month stops at today."""
+    month = month or now.date().replace(day=1)
+    last_day = now.day if (month.year, month.month) == (now.year, now.month) else calendar.monthrange(month.year, month.month)[1]
     costs = {}
     rows = data.get("daily", [])
     for row in rows if isinstance(rows, list) else []:
@@ -237,21 +240,42 @@ def claude_daily_costs(data: Dict, now: datetime) -> Tuple[Tuple[date, float], .
             continue
         value = row_date(row)
         parsed = parse_row_date(value) if len(value) in (8, 10) else None
-        if parsed is None or (parsed.year, parsed.month) != (now.year, now.month):
+        if parsed is None or (parsed.year, parsed.month) != (month.year, month.month):
             continue
         cost = safe_float(row.get("totalCost"))
-        if parsed.day <= now.day and math.isfinite(cost) and cost >= 0:
+        if parsed.day <= last_day and math.isfinite(cost) and cost >= 0:
             costs[parsed.day] = costs.get(parsed.day, 0.0) + cost
     return tuple(
-        (date(now.year, now.month, day), costs.get(day, 0.0))
-        for day in range(1, now.day + 1)
+        (date(month.year, month.month, day), costs.get(day, 0.0))
+        for day in range(1, last_day + 1)
     )
 
 
-def claude_daily_model_costs(data: Dict, now: datetime) -> Dict:
+def claude_monthly_daily_costs(data: Dict, now: datetime) -> Dict:
+    """Include idle months between the earliest recorded day and this month."""
+    current = now.date().replace(day=1)
+    earliest = current
+    rows = data.get("daily", [])
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        value = row_date(row)
+        parsed = parse_row_date(value) if len(value) in (8, 10) else None
+        if parsed is not None:
+            earliest = min(earliest, parsed.date().replace(day=1))
+    result = {}
+    month = earliest
+    while month <= current:
+        result[month] = claude_daily_costs(data, now, month)
+        month = date(month.year + (month.month == 12), month.month % 12 + 1, 1)
+    return result
+
+
+def claude_daily_model_costs(data: Dict, now: datetime, monthly_days=None) -> Dict:
     from ai_usage_intraday import cost_breakdown
 
-    days = dict(claude_daily_costs(data, now))
+    days = (dict(day for series in monthly_days.values() for day in series)
+            if monthly_days is not None else dict(claude_daily_costs(data, now)))
     result = {day: {} for day in days}
     rows = data.get("daily", [])
     for row in rows if isinstance(rows, list) else []:
@@ -287,6 +311,7 @@ class UsageSnapshot:
     ccusage_path: str = ""
     ccusage_version: str = ""
     daily_model_costs: Dict = field(default_factory=dict)
+    monthly_daily_costs: Dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -413,13 +438,13 @@ def remove_autostart(config_home: Optional[Path] = None) -> Tuple[Path, bool]:
     return target, True
 
 
-def fetch_command(config: TrayConfig, refresh_pricing: bool, now: datetime) -> list:
+def fetch_command(config: TrayConfig, refresh_pricing: bool, now: datetime, include_history=False) -> list:
     command = [
         str(config.script_path),
         "--dump-claude-tray-json",
         "--no-update",
         "--since",
-        now.strftime("%Y%m01"),
+        "19700101" if include_history else now.strftime("%Y%m01"),
     ]
     if not refresh_pricing:
         command.append("--no-pricing-update")
@@ -439,7 +464,7 @@ def fetch_usage(config: TrayConfig, refresh_pricing: bool) -> Tuple[float, float
 def fetch_usage_snapshot(config: TrayConfig, refresh_pricing: bool, log_reader=None) -> UsageSnapshot:
     now = datetime.now()
     result = subprocess.run(
-        fetch_command(config, refresh_pricing, now),
+        fetch_command(config, refresh_pricing, now, include_history=log_reader is not None),
         check=False,
         capture_output=True,
         text=True,
@@ -488,15 +513,16 @@ def fetch_usage_snapshot(config: TrayConfig, refresh_pricing: bool, log_reader=N
             return estimated_model_cost(item, record)
 
         try:
-            intraday_days = log_reader.load_days(now, config.project, price_event)
+            intraday_days = log_reader.load_days(now, config.project, price_event, include_history=True)
             intraday = intraday_days.get(now.date(), IntradayUsage())
         except OSError as exc:
             intraday = IntradayUsage(error=f"Could not read timestamped usage: {exc}")
+    monthly_days = claude_monthly_daily_costs(data, now)
     return UsageSnapshot(
         claude_month_cost(data, now), claude_today_cost(data, now), now,
         claude_daily_costs(data, now), intraday, intraday_days,
         data.get("ccusagePath", ""), data.get("ccusageVersion", ""),
-        claude_daily_model_costs(data, now),
+        claude_daily_model_costs(data, now, monthly_days), monthly_days,
     )
 
 

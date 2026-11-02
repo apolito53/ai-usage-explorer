@@ -19,20 +19,25 @@ class ChartDataTests(unittest.TestCase):
                 (datetime(2026, 10, 8, 1, 10).astimezone(), 3),
             ))},
             daily_model_costs={date(2026, 10, 8): {"claude-opus-5": 3, "claude-sonnet-4": 2}},
+            monthly_daily_costs={},
         )
         graph.model_colors = {"": (0.55, 0.58, 0.62)}
         graph.selected_models = None
         graph.legend_models = ()
         graph.model_checks = {}
         graph.syncing_models = False
+        graph.selected_month = None
+        graph.month_choices = ()
         graph.Gtk = Mock()
         graph.view, graph.history_day, graph.selected = "month", None, None
         graph.cumulative = graph.today_cumulative = graph.day_cumulative = False
         graph.interval_minutes = 60
         graph.Gdk = SimpleNamespace(KEY_Return=13, KEY_KP_Enter=14, KEY_space=32, KEY_Left=37, KEY_Right=39)
         for name in ("detail", "area", "subtitle", "chart_note", "legend", "history_controls", "ranges",
-                     "month_label", "today_label", "updated", "_set_cursor", "model_filter_label"):
+                     "month_label", "today_label", "updated", "_set_cursor", "model_filter_label",
+                     "month_picker", "previous_month", "next_month", "month_list", "month_scroll", "month_popover"):
             setattr(graph, name, Mock())
+        graph.month_list.get_children.return_value = []
         graph.legend.get_children.return_value = []
         graph.ranges.set_visible_child_name.side_effect = lambda view: graph._select_view(
             SimpleNamespace(get_visible_child_name=lambda: view), None,
@@ -40,6 +45,53 @@ class ChartDataTests(unittest.TestCase):
         graph._update_chart()
         graph.plot_bounds = (0, 0, 300, 100)
         return graph
+
+    def test_prior_month_navigation_filters_cumulative_and_day_return(self):
+        graph = self.make_graph()
+        month, day = date(2026, 9, 1), date(2026, 9, 30)
+        graph.snapshot.monthly_daily_costs[month] = tuple(
+            (date(2026, 9, d), 7 if d == 30 else 0) for d in range(1, 31)
+        )
+        graph.snapshot.daily_model_costs[day] = {"old-model": 7}
+        stamp = datetime(2026, 9, 30, 10).astimezone()
+        graph.snapshot.intraday_days[day] = IntradayUsage(((stamp, 7),), model_costs=((stamp, "old-model", 7),))
+        graph._select_month(None, month)
+        self.assertEqual(30, len(graph.series))
+        graph.subtitle.set_text.assert_called_with("September 2026 · USD")
+        self.assertIn("September 2026 total", graph.month_label.set_markup.call_args.args[0])
+        self.assertIn("$7.00", graph.month_label.set_markup.call_args.args[0])
+        graph.previous_month.set_sensitive.assert_called_with(False)
+        graph.next_month.set_sensitive.assert_called_with(True)
+        graph._move_month(None, 1)
+        self.assertIsNone(graph.selected_month)
+        graph._move_month(None, -1)
+        graph._select_models(None, {"old-model"})
+        graph._select_mode(Mock(get_active=lambda: True), True)
+        self.assertEqual(7, graph._values()[-1])
+        graph._select_mode(Mock(get_active=lambda: True), False)
+        self.assertTrue(graph._open_day(29))
+        self.assertEqual(7, sum(graph._values()))
+        self.assertNotIn("daily total:", graph.chart_note.set_text.call_args.args[0])
+        graph.set_usage(graph.snapshot)
+        self.assertEqual("day", graph.view)
+        graph._back_to_month(None)
+        self.assertEqual((month, 29), (graph.selected_month, graph.selected))
+        graph._select_month(None, date(2026, 10, 1))
+        self.assertIsNone(graph.selected_month)
+        graph.next_month.set_sensitive.assert_called_with(False)
+
+    def test_month_rollover_follows_current_but_preserves_historical_selection(self):
+        graph = self.make_graph()
+        old_month = date(2026, 10, 1)
+        graph.snapshot.monthly_daily_costs[old_month] = graph.snapshot.daily_costs
+        graph.snapshot.refreshed_at = datetime(2026, 11, 1)
+        graph.snapshot.daily_costs = ((date(2026, 11, 1), 1),)
+        graph.set_usage(graph.snapshot)
+        self.assertEqual(graph.snapshot.daily_costs, graph.series)
+        graph._select_month(None, old_month)
+        graph.set_usage(graph.snapshot)
+        self.assertEqual(old_month, graph.selected_month)
+        self.assertEqual(10, sum(graph._values()))
 
     def test_pointer_events_before_first_draw_are_ignored(self):
         graph = UsageGraphWindow.__new__(UsageGraphWindow)

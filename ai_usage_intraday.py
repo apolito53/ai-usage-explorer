@@ -169,8 +169,8 @@ class ClaudeLogReader:
     def load(self, now, project, price_event):
         return self.load_days(now, project, price_event).get(now.astimezone().date(), IntradayUsage())
 
-    def load_days(self, now, project, price_event):
-        """Price timestamped usage by local day for the current month."""
+    def load_days(self, now, project, price_event, include_history=False):
+        """Price local days, optionally including prior months for tray charts."""
         roots = self.roots if self.roots is not None else claude_log_roots()
         files, events = {}, []
         for root in roots:
@@ -189,7 +189,9 @@ class ClaudeLogReader:
         costs, unpriced, model_costs = {}, {}, {}
         for event in deduplicate_events(events):
             day = event.timestamp.astimezone().date()
-            if (day.year, day.month) != (current.year, current.month) or event.timestamp > current:
+            if event.timestamp > current:
+                continue
+            if not include_history and (day.year, day.month) != (current.year, current.month):
                 continue
             costs.setdefault(day, [])
             cost = price_event(event)

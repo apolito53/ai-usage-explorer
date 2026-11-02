@@ -10,7 +10,7 @@ editing so changes land on the correct side of that boundary.
 | --- | --- |
 | `ai-usage-explorer.sh` | CLI parsing, self-update, dependency setup, `ccusage` invocation, provider normalization, pricing snapshots, and the embedded Rich terminal UI |
 | `ai-usage-tray.py` | Shared Claude tray core plus the Ubuntu GTK/AppIndicator frontend |
-| `ai_usage_chart.py` | Ubuntu monthly and intraday chart window with daily-bar drill-down; loads GTK/Cairo lazily |
+| `ai_usage_chart.py` | Ubuntu month selector, historical/current monthly charts and intraday drill-down; loads GTK/Cairo lazily |
 | `ai_usage_intraday.py` | Read-only Claude log reader, duplicate handling, in-memory file reuse, and local-time interval grouping |
 | `ai_usage_updates.py` | `ccusage` version detection, executable selection, registry checks, and verified version installation |
 | `macos/ai-usage-macos.py` | macOS AppKit menu-bar frontend; imports the shared tray core |

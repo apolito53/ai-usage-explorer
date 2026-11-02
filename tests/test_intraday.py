@@ -171,6 +171,10 @@ class IntradayTests(unittest.TestCase):
             # Cached historical files still provide details without another read.
             with patch.object(reader, "_read_file", side_effect=AssertionError("reread")):
                 self.assertEqual(days, reader.load_days(now, "wanted", price))
+                historical = reader.load_days(now, "wanted", price, include_history=True)
+            self.assertEqual(set(days) | {date(2026, 9, 30)}, set(historical))
+            self.assertEqual(1, sum(cost for _stamp, cost in historical[date(2026, 9, 30)].costs))
+            self.assertEqual(days, {day: usage for day, usage in historical.items() if day.month == 10})
 
     def test_reader_reuses_unchanged_files_and_handles_append_truncation_and_removal(self):
         with tempfile.TemporaryDirectory() as temp_dir, local_timezone("UTC"):

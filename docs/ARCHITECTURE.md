@@ -108,6 +108,10 @@ installed but the optional GI typelib is not.
 Its Usage graphs action lazily opens `ai_usage_chart.py`, a GTK/Cairo window
 with spending bars and cumulative area charts. `fetch_usage_snapshot` retains the daily
 series after pricing backfill so chart updates and panel totals share one poll.
+Ubuntu polls include all available local history, grouped into zero-filled
+calendar months, plus timestamped day details. The chart keeps the selected
+month across refreshes; its live month selection follows calendar rollovers.
+The macOS totals-only poll retains its current-month collection window.
 Monthly daily bars with timestamped details use a darker color and open a dated
 intraday tab; a legend identifies bars that have only an aggregate daily total.
 The existing `fetch_usage` tuple interface remains available to macOS.

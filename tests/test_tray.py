@@ -189,6 +189,33 @@ class TraySummaryTests(unittest.TestCase):
             TRAY.claude_daily_costs({}, datetime(2026, 9, 1)),
         )
 
+    def test_historical_months_include_leap_days_idle_months_and_year_boundary(self):
+        usage = {"daily": [
+            {"date": "2023-12-31", "totalCost": 9},
+            {"date": "20240229", "totalCost": 7, "modelBreakdowns": [{"modelName": "old", "cost": 7}]},
+            {"date": "2024-03-02", "totalCost": 3},
+            {"date": "2024-03-03", "totalCost": 999},
+            {"date": "2024-04-01", "totalCost": 999},
+            {"date": "invalid", "totalCost": 999}, None,
+        ]}
+        now = datetime(2024, 3, 2)
+        months = TRAY.claude_monthly_daily_costs(usage, now)
+        self.assertEqual([31, 31, 29, 2], [len(days) for days in months.values()])
+        self.assertEqual([9, 0, 7, 3], [sum(cost for _day, cost in days) for days in months.values()])
+        parts = TRAY.claude_daily_model_costs(usage, now, months)
+        self.assertEqual({"old": 7}, parts[date(2024, 2, 29)])
+
+    def test_history_fetch_does_not_limit_the_tray_to_current_month(self):
+        config = SimpleNamespace(script_path=Path("/launcher"), project="wanted", online=False)
+        now = datetime(2026, 11, 2)
+        command = TRAY.fetch_command(config, False, now, include_history=True)
+        self.assertEqual("19700101", command[command.index("--since") + 1])
+        self.assertIn("--no-update", command)
+        self.assertIn("--no-pricing-update", command)
+        self.assertEqual("wanted", command[command.index("--project") + 1])
+        command = TRAY.fetch_command(config, False, now)
+        self.assertEqual("20261101", command[command.index("--since") + 1])
+
     def test_daily_model_costs_combine_rows_and_preserve_missing_breakdowns(self):
         usage = {"daily": [
             {"date": "2026-08-01", "totalCost": 5, "modelBreakdowns": [
@@ -274,6 +301,7 @@ class TraySummaryTests(unittest.TestCase):
     def test_historical_intraday_costs_use_pricing_effective_on_each_local_day(self):
         now = datetime(2026, 8, 3, 12)
         history = {"snapshots": [
+            {"effectiveDate": "2026-07-01", "models": {"claude-test": {"rates": {"input": 3}}}},
             {"effectiveDate": "2026-08-01", "models": {"claude-test": {"rates": {"input": 5}}}},
             {"effectiveDate": "2026-08-03", "models": {"claude-test": {"rates": {"input": 10}}}},
         ]}
@@ -288,6 +316,10 @@ class TraySummaryTests(unittest.TestCase):
                 for day in (1, 2, 3)
             ]
             records[1]["costUSD"] = 2.0
+            records.append({
+                "timestamp": datetime(2026, 7, 31, 10).astimezone().isoformat(),
+                "message": {"id": "prior-month", "model": "claude-test", "usage": {"input_tokens": 1_000_000}},
+            })
             (project / "session.jsonl").write_text('\n'.join(json.dumps(row) for row in records))
             config = SimpleNamespace(pricing_history_path=Path("/unused"), project="wanted")
             with patch.object(TRAY, "datetime") as clock, \
@@ -302,6 +334,7 @@ class TraySummaryTests(unittest.TestCase):
                 for day in (1, 2, 3)
             ])
             self.assertIs(snapshot.intraday, snapshot.intraday_days[now.date()])
+            self.assertEqual(3, sum(cost for _time, cost in snapshot.intraday_days[date(2026, 7, 31)].costs))
 
     def test_zero_cost_model_is_backfilled_before_totaling(self):
         usage = {

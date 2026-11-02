@@ -63,6 +63,9 @@ class UsageGraphWindow:
         self.day_cumulative = False
         self.view = "month"
         self.history_day = None
+        # None follows the current month across refreshes and month rollovers.
+        self.selected_month = None
+        self.month_choices = ()
         self.interval_minutes = 60
         self.interval_buttons = {}
         self.history_interval_buttons = {}
@@ -116,6 +119,27 @@ class UsageGraphWindow:
         body.pack_start(switcher, False, False, 0)
         body.pack_start(self.ranges, False, False, 0)
 
+        month_controls = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=8)
+        navigation = gtk.Box(spacing=8)
+        self.previous_month = gtk.Button(label="←")
+        self.previous_month.set_tooltip_text("Previous month")
+        self.previous_month.connect("clicked", self._move_month, -1)
+        self.month_picker = gtk.MenuButton(label="Choose month ▾")
+        self.month_popover = gtk.Popover.new(self.month_picker)
+        self.month_picker.set_popover(self.month_popover)
+        self.month_list = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=2)
+        self.month_scroll = gtk.ScrolledWindow()
+        self.month_scroll.set_policy(gtk.PolicyType.NEVER, gtk.PolicyType.AUTOMATIC)
+        self.month_scroll.set_min_content_width(240)
+        self.month_scroll.add(self.month_list)
+        self.month_popover.add(self.month_scroll)
+        self.next_month = gtk.Button(label="→")
+        self.next_month.set_tooltip_text("Next month")
+        self.next_month.connect("clicked", self._move_month, 1)
+        navigation.pack_start(self.previous_month, False, False, 0)
+        navigation.pack_start(self.month_picker, True, True, 0)
+        navigation.pack_start(self.next_month, False, False, 0)
+        month_controls.pack_start(navigation, False, False, 0)
         controls = gtk.Box(spacing=0)
         controls.get_style_context().add_class("linked")
         daily = gtk.RadioButton.new_with_label_from_widget(None, "Daily spending")
@@ -124,7 +148,8 @@ class UsageGraphWindow:
             button.set_mode(False)
             button.connect("toggled", self._select_mode, mode)
             controls.pack_start(button, False, False, 0)
-        self.ranges.add_titled(controls, "month", "This month")
+        month_controls.pack_start(controls, False, False, 0)
+        self.ranges.add_titled(month_controls, "month", "Monthly")
 
         today_controls = self._day_controls("today", self.interval_buttons)
         self.ranges.add_titled(today_controls, "today", "Today")
@@ -191,7 +216,7 @@ class UsageGraphWindow:
         gtk = self.Gtk
         controls = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=8)
         if view == "day":
-            back = gtk.Button(label="← This month")
+            back = gtk.Button(label="← Back to month")
             back.set_halign(gtk.Align.START)
             back.connect("clicked", self._back_to_month)
             controls.pack_start(back, False, False, 0)
@@ -234,12 +259,60 @@ class UsageGraphWindow:
         if self.snapshot is None or self.snapshot.refreshed_at.date() != snapshot.refreshed_at.date():
             self.selected = None
         self.snapshot = snapshot
-        if self.view == "day" and (self.history_day.year, self.history_day.month) != (
-            snapshot.refreshed_at.year, snapshot.refreshed_at.month,
-        ):
+        if self.view == "day" and self.history_day.replace(day=1) not in self._months():
             self.ranges.set_visible_child_name("month")
         self.updated.set_text(snapshot.refreshed_at.strftime("Updated %b %-d, %-I:%M %p"))
         self._update_chart()
+
+    def _months(self):
+        current = self.snapshot.refreshed_at.date().replace(day=1)
+        return {current: self.snapshot.daily_costs, **self.snapshot.monthly_daily_costs}
+
+    def _month(self):
+        return self.selected_month or self.snapshot.refreshed_at.date().replace(day=1)
+
+    def _month_days(self):
+        return self._months()[self._month()]
+
+    def _sync_month_picker(self):
+        months = self._months()
+        if self.selected_month is not None and self.selected_month not in months:
+            self.selected_month = None
+            self.selected = None
+        choices = tuple(sorted(months))
+        current = self.snapshot.refreshed_at.date().replace(day=1)
+        # A popover opens on click and stays open until a month is chosen or dismissed.
+        if choices != self.month_choices:
+            for child in self.month_list.get_children():
+                self.month_list.remove(child)
+            for month in choices:
+                label = month.strftime("%B %Y")
+                button = self.Gtk.Button(label=f"This month · {label}" if month == current else label)
+                button.connect("clicked", self._select_month, month)
+                self.month_list.pack_start(button, False, False, 0)
+            self.month_scroll.set_min_content_height(min(280, len(choices) * 40))
+            self.month_scroll.show_all()
+            self.month_choices = choices
+        label = self._month().strftime("%B %Y")
+        self.month_picker.set_label(f"This month · {label} ▾" if self._month() == current else f"{label} ▾")
+        self.previous_month.set_sensitive(self._month() != choices[0])
+        self.next_month.set_sensitive(self._month() != choices[-1])
+
+    def _select_month(self, _button, month):
+        if self.snapshot is None:
+            return
+        self.month_popover.popdown()
+        current = self.snapshot.refreshed_at.date().replace(day=1)
+        self.selected_month = None if month == current else month
+        self.selected = None
+        self._update_chart()
+
+    def _move_month(self, _button, direction):
+        if self.snapshot is None:
+            return
+        index = self.month_choices.index(self._month()) + direction
+        if 0 <= index < len(self.month_choices):
+            self._select_month(None, self.month_choices[index])
 
     def set_status(self, message, refreshing):
         self.status.set_text(message)
@@ -248,6 +321,10 @@ class UsageGraphWindow:
 
     def _window_key(self, _window, event):
         if event.keyval == self.Gdk.KEY_Escape:
+            if self.month_popover.get_visible():
+                self.month_popover.popdown()
+                self.month_picker.grab_focus()
+                return True
             self.window.hide()
             return True
         return False
@@ -330,20 +407,25 @@ class UsageGraphWindow:
         self.model_filter_label.set_text(caption)
         if self.snapshot is None:
             return
-        month, today = self.snapshot.month_cost, self.snapshot.today_cost
+        current = self.snapshot.refreshed_at.date().replace(day=1)
+        month_days = self._month_days()
+        month = self.snapshot.month_cost if self._month() == current else sum(cost for _day, cost in month_days)
+        today = self.snapshot.today_cost
         if self.selected_models is not None:
             month = sum(sum(self._filter_parts(self._daily_parts(day, total)).values())
-                        for day, total in self.snapshot.daily_costs)
+                        for day, total in month_days)
             today = sum(self._filter_parts(self._daily_parts(self.snapshot.refreshed_at.date(), today)).values())
-        for label, caption, value in ((self.month_label, "Month to date", month),
+        month_caption = "Month to date" if self._month() == current else self._month().strftime("%B %Y total")
+        for label, caption, value in ((self.month_label, month_caption, month),
                                       (self.today_label, "Today", today)):
             label.set_markup(f'{caption}\n<span size="x-large" weight="bold">${value:,.2f}</span>')
 
     def _update_legend(self):
         models = {model for parts in self.model_series for model in parts}
         if self.snapshot is not None:
-            for day, total in self.snapshot.daily_costs:
-                models.update(self._daily_parts(day, total))
+            for series in self._months().values():
+                for day, total in series:
+                    models.update(self._daily_parts(day, total))
             for usage in (*self.snapshot.intraday_days.values(), self.snapshot.intraday):
                 if usage is not None and not usage.error:
                     models.update(model for _time, model, cost in usage.model_costs if cost > 0)
@@ -400,6 +482,7 @@ class UsageGraphWindow:
         note = ""
         self.chart_message = "Waiting for usage…"
         if self.snapshot is not None:
+            self._sync_month_picker()
             now = self.snapshot.refreshed_at
             if self.view in ("today", "day"):
                 day = now.date() if self.view == "today" else self.history_day
@@ -432,14 +515,14 @@ class UsageGraphWindow:
                         note += f" · {usage.unpriced} usage records could not be priced"
                     total = sum(sum(self._filter_parts(parts).values()) for parts in self.model_series)
                     daily_total = (self.snapshot.today_cost if is_today
-                                   else dict(self.snapshot.daily_costs).get(day, 0))
+                                   else dict(self._months().get(day.replace(day=1), ())).get(day, 0))
                     if self.selected_models is not None:
                         daily_total = sum(self._filter_parts(self._daily_parts(day, daily_total)).values())
                     if abs(total - daily_total) >= 0.01:
                         note += f"\nTimestamped total: ${total:,.2f} · daily total: ${daily_total:,.2f}"
             else:
-                self.subtitle.set_text(now.strftime("%B %Y") + " · USD")
-                self.series = self.snapshot.daily_costs
+                self.subtitle.set_text(self._month().strftime("%B %Y") + " · USD")
+                self.series = self._month_days()
                 self.model_series = tuple(
                     self._daily_parts(day, total)
                     for day, total in self.series
@@ -571,6 +654,7 @@ class UsageGraphWindow:
         if day == self.snapshot.refreshed_at.date():
             self.ranges.set_visible_child_name("today")
         else:
+            self.selected_month = day.replace(day=1)
             self.history_day = day
             self.ranges.add_titled(self.history_controls, "day", day.strftime("%b %-d"))
             self.history_controls.show()

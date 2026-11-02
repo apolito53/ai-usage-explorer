@@ -43,8 +43,15 @@ The menu displays:
 - an update row only when a new revision is available;
 - actions to refresh, open the terminal explorer, and quit.
 
-Choose **Usage graphs…**, then **This month** for daily or cumulative spending,
-or **Today** for an intraday chart. Today's interval selector offers **1h · 30m ·
+Choose **Usage graphs…**, then **Monthly** for daily or cumulative spending,
+or **Today** for an intraday chart. The month selector and **← / →** buttons
+browse prior months available in your local history. Click the selector once
+to open the month list, then click a month; Escape or clicking outside dismisses
+the list. Choose **This month** in
+the selector to return to the live month. Past months show every calendar day;
+the current month stops at today. Idle months between the first recorded month
+and today remain selectable. The month header shows the selected month's total.
+Today's interval selector offers **1h · 30m ·
 15m · 5m · 1m**. Choose **Per interval** for spending within each interval, or
 **Cumulative** for the running total since local midnight. Both modes use the
 selected interval. Daily spending and Per interval use stacked bars, with a
@@ -55,23 +62,26 @@ without a model breakdown is shown as gray **Unattributed** segments.
 All models are selected initially. Click a model name below the chart to show
 only that model, or use its checkbox to add/remove it from a combined view.
 **All** restores every model; **None** clears the selection. The selection
-filters both bar and cumulative charts, hover details, and the Month to date
-and Today header totals. The header lists the selected models. Selection stays
+filters both bar and cumulative charts, hover details, and the header totals
+for the selected month and Today. The header lists the selected models. Selection stays
 in place across date/interval changes, refreshes, and hiding/reopening the
 window. With All selected, newly encountered models are included automatically;
 a custom selection stays unchanged. Models remain selectable even when they
 have no spending in the current view.
-Today keeps its mode selection separate from This month. Empty elapsed
+Today keeps its mode selection separate from Monthly. Empty elapsed
 intervals are zero in Per interval mode and flat in Cumulative mode; the
 current interval is labeled as incomplete, and future
 intervals are not plotted. Times follow your computer's local timezone.
 Escape or closing the window hides it while the tray keeps running.
 
-In **This month → Daily spending**, outlined bars have timestamped day details.
+In **Monthly → Daily spending**, outlined bars have timestamped day details,
+including in prior months.
 Click one (or select it with Left/Right and press Enter) to open that date with
 the same interval and cumulative controls as Today. Past dates cover the full
-local day; clicking today's bar opens Today. **← This month** returns to the
+local day; clicking today's bar opens Today. **← Back to month** returns to the
 selected bar. Bars without an outline show daily totals only.
+A historical selection stays in place when usage refreshes, including across
+month boundaries. The live **This month** selection follows the new month.
 A day can have partial timestamped history; any
 difference from its daily total is shown below the detail chart.
 
@@ -89,7 +99,9 @@ files. It does not create a usage database, save conversation text, or change
 the polling interval when you switch chart intervals.
 
 The chart shares the tray's project filter, pricing fallback, and one-minute
-refresh. Refresh failures keep the last successful chart visible with an error
+refresh. History comes from the local records still on this machine; deleted
+logs cannot be recovered by the chart. Refresh failures keep the last successful
+chart visible with an error
 and its original timestamp. A failure to read local session logs is reported
 in the day charts without preventing the tray totals from refreshing.
 Ubuntu's AppIndicator menu transports standard menu
