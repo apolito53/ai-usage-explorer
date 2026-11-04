@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime
@@ -22,6 +25,47 @@ SPEC.loader.exec_module(MAC_APP)
 
 
 class MacOSMenuBarTests(unittest.TestCase):
+    def test_refresh_works_outside_checkout_in_fresh_process(self):
+        # Isolate imports so the test runner cannot supply the shared helpers.
+        probe = """
+import json
+import runpy
+import subprocess
+import sys
+from datetime import datetime
+from unittest.mock import patch
+
+app = runpy.run_path(sys.argv[1])
+core = app["CORE"]
+config = app["parse_args"]([])
+now = datetime(2026, 9, 3, 12)
+response = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+    "monthly": [{"month": "2026-09", "totalCost": 12.5}],
+    "daily": [{"date": "2026-09-03", "totalCost": 3.0}],
+}))
+with patch.object(core, "datetime") as clock, \\
+     patch.object(core.subprocess, "run", return_value=response), \\
+     patch.object(core, "read_pricing_history", return_value={}):
+    clock.now.return_value = now
+    clock.strptime.side_effect = datetime.strptime
+    month_cost, today_cost, refreshed_at = core.fetch_usage(config, False)
+print(json.dumps([month_cost, today_cost, refreshed_at.isoformat()]))
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", probe, str(MAC_APP_PATH)],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [12.5, 3.0, "2026-09-03T12:00:00"],
+            json.loads(result.stdout),
+        )
+
     def test_default_config_points_at_this_checkout(self):
         with patch.dict(
             os.environ,

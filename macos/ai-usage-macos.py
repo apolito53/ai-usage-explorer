@@ -18,6 +18,11 @@ from types import ModuleType
 ROOT = Path(__file__).resolve().parents[1]
 TRAY_CORE_PATH = ROOT / "ai-usage-tray.py"
 
+# The tray core lazily imports sibling modules from the repository root.
+# Launching this script directly only adds macos/ to the import path.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def load_tray_core(path: Path = TRAY_CORE_PATH) -> ModuleType:
     spec = importlib.util.spec_from_file_location("ai_usage_tray_core", path)
