@@ -9,7 +9,7 @@ historical token rates.
 | --- | --- | --- |
 | Terminal dashboard | Linux and macOS | Full interactive usage exploration |
 | Panel indicator | Ubuntu and derivatives | At-a-glance Claude month/today cost |
-| Menu-bar companion | macOS | At-a-glance Claude month/today cost |
+| Menu-bar companion | macOS | Claude month/today cost and local browser graphs |
 
 The desktop companions are personal monitors. They read usage history from the
 current machine; there is no hosted service or shared team account.
@@ -58,7 +58,9 @@ On macOS:
 ```
 
 See the [macOS setup guide](macos/README.md) for installation, removal, logs,
-and the real-Mac validation checklist.
+and the real-Mac validation checklist. Its **Usage graphs…** menu action opens
+monthly and intraday charts in your default browser, with model filters and
+cumulative views.
 
 ## Documentation
 

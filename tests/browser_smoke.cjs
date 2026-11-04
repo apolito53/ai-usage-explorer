@@ -1,0 +1,111 @@
+// Optional: PLAYWRIGHT_MODULE=/path/to/playwright node tests/browser_smoke.cjs
+const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
+const { createInterface } = require("node:readline");
+const path = require("node:path");
+const playwright = require(process.env.PLAYWRIGHT_MODULE || "playwright");
+
+(async () => {
+  const child = spawn(process.env.PYTHON || "python3", ["-u", path.join(__dirname, "browser_fixture.py")]);
+  child.stderr.pipe(process.stderr);
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  async function next() {
+    const result = await lines.next();
+    if (result.done) throw new Error("Chart fixture exited unexpectedly");
+    return JSON.parse(result.value);
+  }
+  async function command(text) { child.stdin.write(text + "\n"); return next(); }
+  let browser;
+  try {
+    const { url } = await next();
+    const engine = process.env.BROWSER || "chromium";
+    const options = { headless: true };
+    if (process.env.BROWSER_EXECUTABLE) options.executablePath = process.env.BROWSER_EXECUTABLE;
+    browser = await playwright[engine].launch(options);
+    console.log(`${engine}: browser started`);
+    const page = await browser.newPage({ viewport: { width: 1120, height: 900 }, locale: "en-US" });
+    page.setDefaultTimeout(15000);
+    const errors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await page.goto(url);
+    await page.getByRole("status").filter({ hasText: "Waiting for usage" }).waitFor();
+    await command("ready");
+    await page.waitForFunction(() => document.getElementById("month-total").textContent !== "—");
+    console.log(`${engine}: chart data loaded`);
+    assert.equal(await page.locator("#month-total").textContent(), "$99.30");
+    assert.equal(await page.locator("#today-total").textContent(), "$7.40");
+    assert.equal(await page.locator("#month option").count(), 3);
+    await page.locator("#month").selectOption("2024-01");
+    assert.equal(await page.locator("#month-total").textContent(), "$0.00");
+    await page.getByText("No recorded spending", { exact: true }).waitFor();
+    await page.locator("#month").selectOption("2024-02");
+    assert.equal(await page.locator("#month-total").textContent(), "$141.90");
+    assert.equal(await page.locator("#today-total").textContent(), "$7.40");
+    await page.locator("#month").selectOption("2024-03");
+    await page.locator("#model-caption").click();
+    await page.locator("#no-models").click();
+    assert.equal(await page.locator("#month-total").textContent(), "$0.00");
+    await page.getByText("No models selected", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "sonnet", exact: true }).click();
+    assert.equal(await page.locator("#month-total").textContent(), "$27.30");
+    await page.getByRole("checkbox", { name: "Include opus", exact: true }).check();
+    assert.equal(await page.locator("#month-total").textContent(), "$99.30");
+    await page.locator("#all-models").click();
+    console.log(`${engine}: months and filters passed`);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#models").getAttribute("open"), null);
+    await page.locator("#chart").focus();
+    await page.keyboard.press("Home");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.getElementById("heading").textContent === "Mar 1, 2024" &&
+      document.getElementById("view-total").textContent !== "—");
+    assert.equal(await page.locator("#view-total").textContent(), "$1.90");
+    await page.locator("#interval").selectOption("1");
+    await page.waitForFunction(() => document.getElementById("view-total").textContent === "$1.90");
+    await page.locator("#cumulative").check();
+    assert.equal(await page.locator("#chart polyline").count(), 1);
+    await page.locator("#today-view").click();
+    await page.waitForFunction(() => document.getElementById("view-total").textContent === "$7.40");
+    await page.locator("#chart").focus();
+    await page.keyboard.press("End");
+    assert.match(await page.locator("#detail").textContent(), /Cumulative.*\$7\.40/);
+    await page.locator("#refresh").click();
+    await page.waitForTimeout(200);
+    assert.ok((await command("check")).refreshes > 0);
+    console.log(`${engine}: day views and refresh passed`);
+    await command("error");
+    await page.getByRole("status").filter({ hasText: "simulated offline" }).waitFor();
+    assert.equal(await page.locator("#month-total").textContent(), "$99.30");
+    await command("ready");
+    await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Updated "));
+    await page.locator("#month-view").click();
+    await page.locator("#cumulative").check();
+    assert.equal(await page.locator("#chart polyline").count(), 1);
+    await page.locator("#cumulative").uncheck();
+    if (process.env.SCREENSHOT) await page.screenshot({ path: process.env.SCREENSHOT, fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.locator("#model-caption").click();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.keyboard.press("Escape");
+    if (process.env.MOBILE_SCREENSHOT) await page.screenshot({ path: process.env.MOBILE_SCREENSHOT, fullPage: true });
+    await command("missing");
+    await page.locator("#today-view").click();
+    await page.getByText("Day details unavailable", { exact: true }).waitFor();
+    assert.equal(await page.locator("#view-total").textContent(), "—");
+    await page.locator("#month-view").click();
+    assert.equal(await page.locator("#month-total").textContent(), "$99.30");
+    await command("rollover");
+    console.log(`${engine}: error and responsive states passed`);
+    await page.waitForFunction(() => document.getElementById("heading").textContent === "April 2024");
+    assert.equal(await page.locator("#month-total").textContent(), "$0.00");
+    assert.deepEqual(errors, []);
+    console.log(`${engine}: loading, months, empty data, filters, drill-down, intervals, cumulative, refresh, errors, mobile, dark mode and rollover passed`);
+  } finally {
+    if (browser) await browser.close();
+    child.stdin.end("stop\n");
+    child.kill();
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });

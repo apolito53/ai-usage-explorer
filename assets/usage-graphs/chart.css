@@ -1,0 +1,58 @@
+:root { color-scheme: light dark; --bg:#f3f5f5; --panel:#fff; --text:#182e2c; --muted:#59716e;
+  --line:#dce5e3; --accent:#168777; --soft:#e7f5f0; --warn:#a03c23; }
+* { box-sizing:border-box; }
+[hidden] { display:none !important; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+main { max-width:1120px; margin:0 auto; padding:44px 32px; }
+header,.toolbar,.chart-heading,.views,.model-actions { display:flex; align-items:center; gap:12px; }
+header,.chart-heading { justify-content:space-between; }
+.eyebrow { color:var(--accent); font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; margin:0 0 8px; }
+h1 { font-size:30px; letter-spacing:-.035em; margin:0; font-weight:650; }
+h2 { font-size:19px; margin:0; font-weight:600; }
+p { margin:8px 0; }
+#project { overflow-wrap:anywhere; color:var(--muted); }
+#status { color:var(--muted); min-height:24px; margin:16px 0 24px; }
+#status.error { color:var(--warn); }
+button,select,summary { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+button,summary { cursor:pointer; }
+button:hover,summary:hover { border-color:var(--accent); }
+button:disabled { cursor:wait; opacity:.55; }
+button[aria-pressed="true"] { background:var(--soft); color:var(--accent); border-color:var(--accent); }
+button:focus-visible,select:focus-visible,summary:focus-visible,input:focus-visible,#chart:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.totals { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-bottom:24px; }
+.totals>div { padding:22px 24px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+.totals span { color:var(--muted); font-size:13px; }
+.totals strong { display:block; margin-top:8px; font-size:30px; letter-spacing:-.04em; font-weight:600; font-variant-numeric:tabular-nums; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:24px; }
+.toolbar { flex-wrap:wrap; border-bottom:1px solid var(--line); padding-bottom:20px; }
+.toolbar label { display:flex; align-items:center; gap:8px; font-size:13px; }
+.cumulative { margin-left:auto; }
+input[type="checkbox"] { accent-color:var(--accent); width:16px; height:16px; }
+.chart-heading { margin:22px 0 8px; align-items:flex-start; }
+#selection { color:var(--muted); font-size:13px; }
+#models { position:relative; }
+summary { white-space:nowrap; font-size:13px; }
+.model-menu { position:absolute; z-index:1; right:0; top:46px; width:min(360px,75vw); background:var(--panel); border:1px solid var(--line); border-radius:12px; box-shadow:0 10px 28px #0002; padding:12px; }
+.model-actions { padding-bottom:10px; }
+.model-actions button { padding:4px 12px; font-size:13px; }
+#model-list { max-height:280px; overflow:auto; }
+.model-row { display:flex; gap:8px; align-items:center; padding:5px 0; }
+.model-row button { flex:1; text-align:left; padding:6px; border:0; display:flex; align-items:center; gap:8px; overflow-wrap:anywhere; font-size:13px; min-width:0; }
+.swatch { flex:none; width:12px; height:12px; }
+#chart { display:block; width:100%; height:340px; overflow:visible; touch-action:pan-y; }
+#chart text { font-family:inherit; fill:var(--muted); font-size:12px; }
+#chart .grid { stroke:var(--line); stroke-width:1; }
+#chart .cursor { stroke:var(--text); stroke-width:1; stroke-dasharray:3 4; pointer-events:none; }
+#detail { padding-top:14px; border-top:1px solid var(--line); min-height:46px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+#note { color:var(--muted); font-size:12px; white-space:pre-line; min-height:36px; }
+footer { text-align:center; color:var(--muted); font-size:12px; margin-top:24px; }
+@media(prefers-color-scheme:dark) {
+  :root { --bg:#121b1b; --panel:#1a2726; --text:#e3eeeb; --muted:#a4bbb4; --line:#31413c; --accent:#52c9ac; --soft:#203f35; --warn:#ffb49b; }
+}
+@media(max-width:620px) {
+  main { padding:24px 14px; } h1 { font-size:24px; } header { align-items:flex-start; }
+  header button { font-size:12px; white-space:nowrap; } .totals { gap:8px; }
+  .totals>div { padding:14px 10px; } .totals strong { font-size:22px; } .totals span { font-size:11px; }
+  .panel { padding:16px 12px; } .cumulative { margin-left:0; } .chart-heading { gap:6px; } h2 { font-size:16px; }
+  #chart { height:300px; } select { max-width:190px; }
+}

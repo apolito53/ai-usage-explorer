@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Claude usage graphs</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="chart.css">
+  <script src="chart.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">AI Usage Explorer / Claude</p><h1>Spending over time</h1>
+        <p id="project" hidden></p></div>
+      <button id="refresh" type="button">Refresh now</button>
+    </header>
+    <p id="status" role="status">Waiting for usage…</p>
+    <section class="totals" aria-label="Spending totals">
+      <div><span id="month-caption">Month to date</span><strong id="month-total">—</strong></div>
+      <div><span>Today</span><strong id="today-total">—</strong></div>
+      <div><span id="view-caption">This view</span><strong id="view-total">—</strong></div>
+    </section>
+    <section class="panel" aria-label="Usage graphs">
+      <div class="toolbar">
+        <div class="views" role="group" aria-label="Chart period">
+          <button id="month-view" type="button" aria-pressed="true">Monthly</button>
+          <button id="today-view" type="button" aria-pressed="false">Today</button>
+        </div>
+        <label id="month-control">Month <select id="month" aria-label="Month"></select></label>
+        <label id="interval-control" hidden>Interval <select id="interval">
+          <option value="60">1 hour</option><option value="30">30 minutes</option>
+          <option value="15">15 minutes</option><option value="5">5 minutes</option>
+          <option value="1">1 minute</option>
+        </select></label>
+        <label class="cumulative"><input id="cumulative" type="checkbox"> Cumulative</label>
+      </div>
+      <div class="chart-heading">
+        <div><h2 id="heading">Usage history</h2><p id="selection">All models · USD</p></div>
+        <details id="models"><summary id="model-caption">Models: All</summary>
+          <div class="model-menu"><div class="model-actions">
+            <button id="all-models" type="button">All</button><button id="no-models" type="button">None</button>
+          </div><div id="model-list"></div></div>
+        </details>
+      </div>
+      <svg id="chart" viewBox="0 0 900 340" tabindex="0" role="img"
+           aria-label="Usage chart. Use arrow keys to inspect values and Enter to open day details."></svg>
+      <p id="detail" aria-live="polite">Hover over the chart to inspect usage.</p>
+      <p id="note">Monthly bars show spending by model. Select a day to see its details.</p>
+    </section>
+    <footer>Local usage history · USD · Updates while the menu-bar app is running</footer>
+  </main>
+</body>
+</html>

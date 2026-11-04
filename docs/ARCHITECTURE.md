@@ -108,19 +108,19 @@ installed but the optional GI typelib is not.
 Its Usage graphs action lazily opens `ai_usage_chart.py`, a GTK/Cairo window
 with spending bars and cumulative area charts. `fetch_usage_snapshot` retains the daily
 series after pricing backfill so chart updates and panel totals share one poll.
-Ubuntu polls include all available local history, grouped into zero-filled
+Both desktop companions poll all available local history, grouped into zero-filled
 calendar months, plus timestamped day details. The chart keeps the selected
 month across refreshes; its live month selection follows calendar rollovers.
-The macOS totals-only poll retains its current-month collection window.
 Monthly daily bars with timestamped details use a darker color and open a dated
 intraday tab; a legend identifies bars that have only an aggregate daily total.
-The existing `fetch_usage` tuple interface remains available to macOS.
+The existing `fetch_usage` tuple interface remains available for totals-only
+callers and retains its current-month collection window.
 
-The Ubuntu poll also uses `ai_usage_intraday.py` to read timestamped Claude
+Both companions use `ai_usage_intraday.py` to read timestamped Claude
 JSONL usage into memory. Unchanged files reuse parsed usage metadata; file
 replacement, truncation, and deletion invalidate it. Conversation content is
 discarded during parsing. Each snapshot includes timestamped costs grouped by
-local day for the current month, priced using each day's effective pricing
+local day across available history, priced using each day's effective pricing
 snapshot. Today and historical day tabs group usage into 60-, 30-, 15-, 5-, or
 1-minute intervals without changing polling or persisting new usage history.
 Grouping starts at local midnight and uses elapsed time, preserving repeated
@@ -131,6 +131,21 @@ availability indicators while aggregate totals continue to refresh.
 The macOS frontend dynamically imports the same module and supplies AppKit menu
 items, timers, Terminal launching, and AppleScript notifications. Cocoa imports
 are lazy, which keeps portable helper tests runnable on Linux.
+
+Its **Usage graphs…** action starts `ai_usage_web.UsageGraphServer` on demand,
+then uses [`NSWorkspace.openURL_`](https://developer.apple.com/documentation/appkit/nsworkspace/open(_:))
+to open the default browser. `assets/usage-graphs/` contains the HTML, CSS, and
+SVG chart renderer. It polls the in-memory snapshot every five seconds without
+triggering additional usage collection. Day requests use the same Python
+interval bucketing as GTK. Browser refresh requests return to the Cocoa main
+thread through [`AppHelper.callAfter`](https://pyobjc.readthedocs.io/en/latest/api/module-PyObjCTools.AppHelper.html).
+
+The graph server binds only to `127.0.0.1` on a random port, uses a random private
+URL per server session, checks Host/Origin, and serves only its three bundled
+assets and aggregate chart data. It has no directory serving, remote assets,
+access logs, or persisted graph data. Responses disable caching; a content
+security policy limits scripts and requests to the same origin. Refresh errors
+preserve the last successful snapshot. The server closes when the app quits.
 
 ## Refresh and update behavior
 

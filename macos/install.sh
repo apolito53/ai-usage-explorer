@@ -66,7 +66,9 @@ fi
 PYTHONPYCACHEPREFIX="${INSTALL_ROOT}/pycache" \
     "${VENV_DIR}/bin/python" -m py_compile \
     "${SCRIPT_DIR}/ai-usage-macos.py" \
-    "${REPO_ROOT}/ai-usage-tray.py"
+    "${REPO_ROOT}/ai-usage-tray.py" \
+    "${REPO_ROOT}/ai_usage_intraday.py" \
+    "${REPO_ROOT}/ai_usage_web.py"
 "${VENV_DIR}/bin/python" -c 'import AppKit, Foundation, objc'
 
 xml_escape() {

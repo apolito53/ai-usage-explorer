@@ -149,8 +149,9 @@ def run_app(config) -> int:
             NSMenuItem,
             NSStatusBar,
             NSVariableStatusItemLength,
+            NSWorkspace,
         )
-        from Foundation import NSObject, NSTimer
+        from Foundation import NSObject, NSTimer, NSURL
         from PyObjCTools import AppHelper
     except ImportError as exc:
         print(
@@ -162,6 +163,8 @@ def run_app(config) -> int:
     class AppDelegate(NSObject):
         @objc.python_method
         def configure(self, tray_config):
+            from ai_usage_intraday import ClaudeLogReader
+
             self.config = tray_config
             self.refreshing = False
             self.checking_for_update = False
@@ -170,6 +173,10 @@ def run_app(config) -> int:
             self.display_period = CORE.DEFAULT_DISPLAY_PERIOD
             self.month_cost = None
             self.today_cost = None
+            self.snapshot = None
+            self.log_reader = ClaudeLogReader()
+            self.graphs = None
+            self.status_message = "Waiting for usage…"
 
         def applicationDidFinishLaunching_(self, _notification):
             self._build_menu()
@@ -250,6 +257,7 @@ def run_app(config) -> int:
             menu.addItem_(NSMenuItem.separatorItem())
             self.refresh_item = self._action_item("Refresh now", "refreshNow:")
             menu.addItem_(self.refresh_item)
+            menu.addItem_(self._action_item("Usage graphs…", "openGraphs:"))
             menu.addItem_(
                 self._action_item("Open AI Usage Explorer", "openExplorer:")
             )
@@ -259,8 +267,11 @@ def run_app(config) -> int:
 
         @objc.python_method
         def _set_message(self, message):
+            self.status_message = message
             self.message_item.setTitle_(message)
             self.message_item.setHidden_(not bool(message))
+            if self.graphs is not None:
+                self.graphs.set_status(message, self.refreshing)
 
         @objc.python_method
         def _update_title(self):
@@ -300,20 +311,25 @@ def run_app(config) -> int:
 
             def worker():
                 try:
-                    result = CORE.fetch_usage(
+                    result = CORE.fetch_usage_snapshot(
                         self.config,
                         refresh_pricing=not self.has_refreshed_pricing,
+                        log_reader=self.log_reader,
                     )
                 except Exception as exc:
                     AppHelper.callAfter(self._finish_refresh_error, str(exc))
                 else:
-                    AppHelper.callAfter(self._finish_refresh_success, *result)
+                    AppHelper.callAfter(self._finish_refresh_success, result)
 
             threading.Thread(target=worker, daemon=True).start()
 
         @objc.python_method
-        def _finish_refresh_success(self, month_cost, today_cost, refreshed_at):
+        def _finish_refresh_success(self, snapshot):
             self.has_refreshed_pricing = True
+            self.snapshot = snapshot
+            month_cost, today_cost, refreshed_at = (
+                snapshot.month_cost, snapshot.today_cost, snapshot.refreshed_at,
+            )
             self.month_cost = month_cost
             self.today_cost = today_cost
             self._update_title()
@@ -327,16 +343,41 @@ def run_app(config) -> int:
                 f"Today: {CORE.format_cost(today_cost)}"
             )
             self.updated_item.setTitle_("Updated " + updated_time(refreshed_at))
-            self._set_message("")
+            if self.graphs is not None:
+                self.graphs.set_usage(snapshot)
             self.refreshing = False
+            self._set_message("")
             self.refresh_item.setEnabled_(True)
 
         @objc.python_method
         def _finish_refresh_error(self, message):
             one_line = " ".join(message.split())
-            self._set_message("Refresh failed: " + one_line[:100])
             self.refreshing = False
+            self._set_message("Refresh failed: " + one_line[:100])
             self.refresh_item.setEnabled_(True)
+
+        def openGraphs_(self, _sender):
+            try:
+                if self.graphs is None:
+                    from ai_usage_web import UsageGraphServer
+
+                    self.graphs = UsageGraphServer(
+                        refresh=lambda: AppHelper.callAfter(self.refreshNow_, None),
+                        project=self.config.project,
+                    )
+                    if self.snapshot is not None:
+                        self.graphs.set_usage(self.snapshot)
+                    self.graphs.set_status(self.status_message, self.refreshing)
+                url = NSURL.URLWithString_(self.graphs.start())
+                if not NSWorkspace.sharedWorkspace().openURL_(url):
+                    raise RuntimeError("Could not open the default browser")
+            except Exception as exc:
+                self._set_message("Could not open usage graphs: " + str(exc))
+                print(f"Could not open usage graphs: {exc}", file=sys.stderr)
+
+        def applicationWillTerminate_(self, _notification):
+            if self.graphs is not None:
+                self.graphs.close()
 
         def checkForUpdates_(self, _sender):
             if self.checking_for_update:

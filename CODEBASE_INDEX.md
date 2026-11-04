@@ -11,6 +11,8 @@ editing so changes land on the correct side of that boundary.
 | `ai-usage-explorer.sh` | CLI parsing, self-update, dependency setup, `ccusage` invocation, provider normalization, pricing snapshots, and the embedded Rich terminal UI |
 | `ai-usage-tray.py` | Shared Claude tray core plus the Ubuntu GTK/AppIndicator frontend |
 | `ai_usage_chart.py` | Ubuntu month selector, historical/current monthly charts and intraday drill-down; loads GTK/Cairo lazily |
+| `ai_usage_web.py` | On-demand loopback server and aggregate chart API for macOS browser graphs |
+| `assets/usage-graphs/` | Local HTML/CSS/JavaScript graphs, filters, history navigation, and live refresh |
 | `ai_usage_intraday.py` | Read-only Claude log reader, duplicate handling, in-memory file reuse, and local-time interval grouping |
 | `ai_usage_updates.py` | `ccusage` version detection, executable selection, registry checks, and verified version installation |
 | `macos/ai-usage-macos.py` | macOS AppKit menu-bar frontend; imports the shared tray core |
@@ -82,6 +84,8 @@ for it.
 | Chart series, axis scaling, daily/cumulative views, historical-day navigation | `tests/test_chart.py` |
 | Timestamped records, duplicates, cache invalidation, full-day intervals and timezones | `tests/test_intraday.py` |
 | macOS argument/escaping/platform behavior | `tests/test_macos.py` |
+| Browser chart API, data boundaries, and local server | `tests/test_web.py` |
+| Browser chart calculations and interactions | `tests/test_web_chart.cjs`, `tests/browser_smoke.cjs` |
 
 The terminal tests extract selected functions and classes from the embedded
 Python with `ast`. If a tested symbol is renamed or begins depending on a new

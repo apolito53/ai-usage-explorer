@@ -2,9 +2,9 @@
 
 ## Setup
 
-The test suite uses only the Python standard library. Running the application
-also requires Bash, Node.js, a `ccusage` runner, and the packages declared in
-`requirements.txt`.
+The Python test suite uses only the standard library. JavaScript chart tests
+use Node's built-in test runner. Running the application also requires Bash,
+Node.js, a `ccusage` runner, and the packages declared in `requirements.txt`.
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -20,8 +20,9 @@ Run the checks appropriate to every code change:
 
 ```bash
 bash -n ai-usage-explorer.sh macos/install.sh macos/uninstall.sh
-python3 -m py_compile ai-usage-tray.py ai_usage_chart.py ai_usage_intraday.py ai_usage_updates.py macos/ai-usage-macos.py
+python3 -m py_compile ai-usage-tray.py ai_usage_chart.py ai_usage_intraday.py ai_usage_updates.py ai_usage_web.py macos/ai-usage-macos.py
 python3 -m unittest discover -s tests -v
+node tests/test_web_chart.cjs
 git diff --check
 ```
 
@@ -41,8 +42,27 @@ Useful smoke checks:
 Ubuntu tray work should be exercised in a real desktop session with the
 installed AppIndicator implementation. macOS UI or LaunchAgent changes require
 a real Mac; Linux can validate only the portable Python helpers, shell guards,
-and source syntax. Follow the checklist in `macos/README.md` when handing off a
+and source syntax, plus the portable browser graphs. Follow the checklist in `macos/README.md` when handing off a
 macOS change.
+
+The browser graph tests need permission to bind loopback sockets. The optional
+Playwright smoke test uses synthetic data and starts its own local server; it
+never reads personal usage logs. Install its development-only browser tools in
+a temporary directory, then run:
+
+```bash
+npm install --prefix /tmp/ai-usage-browser-tests playwright@1.61.1
+/tmp/ai-usage-browser-tests/node_modules/.bin/playwright install chromium webkit
+PLAYWRIGHT_MODULE=/tmp/ai-usage-browser-tests/node_modules/playwright node tests/browser_smoke.cjs
+PLAYWRIGHT_MODULE=/tmp/ai-usage-browser-tests/node_modules/playwright BROWSER=webkit node tests/browser_smoke.cjs
+```
+
+Alternatively, set `BROWSER_EXECUTABLE` to an installed Chromium/Chrome binary.
+`SCREENSHOT` and `MOBILE_SCREENSHOT` optionally save light/desktop and dark/mobile
+previews. WebKit on Linux is useful compatibility coverage, not a substitute for
+testing Safari and the menu-bar integration on macOS.
+The pinned test version avoids a [known Playwright/WebKit startup mismatch](https://github.com/microsoft/playwright/issues/42964)
+with frozen WebKit builds on older operating systems.
 
 ## Change conventions
 
@@ -91,8 +111,13 @@ any guard.
   boundaries.
 - `test_updates.py` covers version detection, executable selection, installation
   failure/activation, and Git update guards using temporary repositories.
-- `test_macos.py` imports the macOS adapter without Cocoa and tests portable
-  configuration and escaping.
+- `test_macos.py` tests configuration, escaping, isolated imports, and graph
+  refresh/open/close wiring using fake Cocoa objects.
+- `test_web.py` covers aggregate serialization, missing logs, time buckets/DST,
+  server access boundaries, refresh requests, and preserved snapshots on errors.
+- `test_web_chart.cjs` checks filtered/cumulative series, totals, and chart scales.
+- `browser_smoke.cjs` exercises the real browser/server flow, including keyboard
+  day navigation, filters, refresh failures, responsive layout, and month rollover.
 
 Because embedded terminal tests execute selected AST nodes, new dependencies on
 module globals must be added to their test namespace. A NameError there usually
